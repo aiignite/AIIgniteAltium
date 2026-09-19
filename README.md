@@ -111,10 +111,20 @@ docker compose up -d --build
 | 用户认证 | ✅ | JWT 注册/登录，启动自动创建管理员 |
 | 工程文件离线解析 | ✅ | 上传 .PrjPcb/.SchDoc/.PcbDoc → 隔离 worker（altium-monkey）→ 元件/引脚级网络/BOM/PCB 统计/板框/叠层 |
 | 可视化查看 | ✅ | 原理图 SVG、PCB SVG、元件/网络（单端标记+引脚明细）/BOM 合并视图 |
-| AI 对话 | ✅ | 技能选择（原理图审查/PCB 审查/需求分析）、离线快照或实时摘要上下文注入、SSE 流式 |
+| AI 对话 | ✅ | 助手选择 + 技能编排、离线快照或实时摘要上下文注入、SSE 流式 |
+| AI 助手 | ✅ | 角色人设 + 系统提示词 + 推荐技能绑定 + 绑定模型；系统助手可编辑、可设默认 |
+| 技能库 | ✅ | 任务级提示词模板 CRUD，关键词自动匹配（`POST /ai/skills/resolve`），对话中候选条手动选用 |
 | 模型管理 | ✅ | mock / OpenAI 兼容（含 Ollama）/ Anthropic，默认模型切换 |
 | Altium 实时连接 | ✅ | 连接测试、实时面板（工程/统计/截图）、对话实时上下文；MCP server 供外部客户端 |
 | 规则引擎/RAG/选型 | 规划中 | 见路线图 |
+
+### AI 助手与技能（复刻 AIIgnitePLM 交互）
+
+- **助手（`/api/v1/ai/assistants`）**：`name` / `description` / `avatar`（16 个内置图标）/ `category` / `systemPrompt` / `skillCodes`（推荐技能）/ `modelConfigId` / `isDefault`；启动自动补种 4 个系统助手（通用硬件、原理图审查、PCB 审查、需求分析）。
+- **技能（`/api/v1/ai/skills`）**：`code` / `name` / `description` / `icon` / `promptTemplate` / `keywords` / `enabled`；启动补种 4 个系统技能（原理图审查、PCB 审查、需求分析、BOM 分析）。系统技能可改提示词但不可删、不可改 code。
+- **编排链路**：输入防抖 500ms → `POST /ai/skills/resolve`（关键词命中 15 分/个、技能名 40、code 50、助手绑定 10，阈值 15，Top-3）→ 候选条可手动增删 → 随 `skills: []` 提交 → 后端按助手人设 + 技能提示词 + 设计上下文组合 system prompt，并以 `skills_activated` 事件回显激活卡。
+- **界面**：对话工作台顶部助手选择器（搜索 + 默认徽标）、欢迎卡（建议提问 + 可用技能）、消息内激活卡（可展开匹配分与原因）、历史会话面板；「AI 助手」页提供助手卡片网格与技能库管理。
+
 
 ## 已知问题
 

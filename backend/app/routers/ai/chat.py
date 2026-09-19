@@ -9,13 +9,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models.ai.ai_model import AIModelConfig
 from app.models.ai.conversation import Conversation, Message
 from app.models.system.user import User
 from app.schemas import CamelModel
 from app.security import get_current_user
 from app.services.ai.orchestrator import stream_reply
-from app.services.ai.skill_registry import SKILLS
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/ai", tags=["ai"])
@@ -25,7 +23,9 @@ class ChatStreamIn(CamelModel):
     content: str = Field(min_length=1, max_length=20000)
     conversation_id: UUID | None = None
     project_id: UUID | None = None
-    skill: str | None = None
+    assistant_id: UUID | None = None
+    skill: str | None = None  # 兼容旧客户端：单技能 code
+    skills: list[str] | None = None  # 技能 code 列表（优先于 skill）
     model_config_id: UUID | None = None
 
 
@@ -33,6 +33,7 @@ class ConversationOut(CamelModel):
     id: str
     title: str
     project_id: str | None
+    assistant_id: str | None
     skill: str
     message_count: int
     created_at: str
@@ -44,6 +45,8 @@ class MessageOut(CamelModel):
     role: str
     content: str
     skill: str
+    skills: list[dict] = []
+    assistant_name: str = ""
     provider: str
     created_at: str
     duration_ms: int
@@ -54,6 +57,7 @@ def _conv_out(c: Conversation) -> ConversationOut:
         id=str(c.id),
         title=c.title,
         project_id=str(c.project_id) if c.project_id else None,
+        assistant_id=str(c.assistant_id) if c.assistant_id else None,
         skill=c.skill,
         message_count=c.message_count,
         created_at=c.created_at.isoformat(),
@@ -61,12 +65,19 @@ def _conv_out(c: Conversation) -> ConversationOut:
     )
 
 
-@router.get("/skills")
-async def list_ai_skills() -> list[dict]:
-    return [
-        {"id": s.id, "name": s.name, "description": s.description, "systemPrompt": s.system_prompt}
-        for s in SKILLS.values()
-    ]
+def _msg_out(m: Message) -> MessageOut:
+    meta = m.meta or {}
+    return MessageOut(
+        id=str(m.id),
+        role=m.role,
+        content=m.content,
+        skill=m.skill,
+        skills=list(meta.get("skills") or []),
+        assistant_name=str(meta.get("assistantName") or ""),
+        provider=m.provider,
+        created_at=m.created_at.isoformat(),
+        duration_ms=m.duration_ms,
+    )
 
 
 @router.post("/chat/stream")
@@ -75,9 +86,6 @@ async def chat_stream(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
-    if body.skill and body.skill not in SKILLS:
-        raise HTTPException(status_code=400, detail=f"未知技能: {body.skill}")
-
     async def event_source():
         async for event in stream_reply(
             db,
@@ -86,6 +94,8 @@ async def chat_stream(
             conversation_id=body.conversation_id,
             project_id=body.project_id,
             skill=body.skill,
+            skills=body.skills,
+            assistant_id=body.assistant_id,
             model_config_id=body.model_config_id,
         ):
             yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
@@ -123,18 +133,7 @@ async def list_messages(
     result = await db.execute(
         select(Message).where(Message.conversation_id == conversation_id).order_by(Message.seq)
     )
-    return [
-        MessageOut(
-            id=str(m.id),
-            role=m.role,
-            content=m.content,
-            skill=m.skill,
-            provider=m.provider,
-            created_at=m.created_at.isoformat(),
-            duration_ms=m.duration_ms,
-        )
-        for m in result.scalars()
-    ]
+    return [_msg_out(m) for m in result.scalars()]
 
 
 @router.delete("/conversations/{conversation_id}")

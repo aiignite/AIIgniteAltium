@@ -3,6 +3,12 @@
 ALL_MODEL_GROUPS = ["system", "ai", "files", "altium"]
 
 from app.models.system import User  # noqa: F401,E402
-from app.models.ai import AIModelConfig, Conversation, Message  # noqa: F401,E402
+from app.models.ai import (  # noqa: F401,E402
+    AIAssistant,
+    AIModelConfig,
+    AISkill,
+    Conversation,
+    Message,
+)
 from app.models.files import UploadedProject  # noqa: F401,E402
 from app.models.altium import GatewayConnection  # noqa: F401,E402

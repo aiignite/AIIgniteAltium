@@ -44,3 +44,11 @@
 - 审查中心/工作台页不套 A/B/C 项目模式：工作台是新形态（左对话右设计画布），审查任务用模式 B 变体（主从面包屑，无 projectId）
 - 数据库迁移：MVP 用 `create_all()` 启动建表，alembic 作为改进项后补（PLM 陷阱 #7 的时序规则届时适用）
 - 编号规则（NumberService）：审查任务号 `RVW-YYYYMM-####` 纳入首批
+
+## 3.1 已落地（2026-09-19，复刻 AIIgnitePLM 助手/技能交互）
+
+- 表：`ai_skills`（code/name/description/category/icon/prompt_template/keywords/is_system/enabled/sort_order）、`ai_assistants`（name/description/avatar/category/system_prompt/skill_codes/model_config_id/is_system/is_default/enabled/usage_count/sort_order）；`ai_conversations.assistant_id` 经 `database_patches.ensure_extra_columns` 幂等补列
+- 种子：`app/services/ai/seed_data.py::seed_skills_and_assistants`，bootstrap 时幂等补种 4 技能 + 4 系统助手（不覆盖用户修改）
+- 端点：`/ai/skills`（CRUD）、`/ai/skills/resolve`（关键词编排，阈值 15、Top-K）、`/ai/assistants`（CRUD + `/default`）；系统技能不可删改 code，系统助手不可删
+- 编排：`orchestrator.compose_system_prompt` = BASE_PROMPT + 助手人设 + 各技能提示词 + 设计上下文；SSE 新增 `skills_activated` 事件；`ChatStreamIn` 新增 `assistantId` / `skills[]`（保留 `skill` 兼容旧客户端）
+- 前端：`components/ai/`（AssistantAvatar / AssistantPicker / SkillActivationCard）、`pages/AssistantsPage.tsx`（助手卡片网格 + 技能库）、工作台内嵌对话面板（欢迎卡/候选技能条/激活卡/历史面板）；基础样式类集中在 `index.css` 的 `.ai-*`

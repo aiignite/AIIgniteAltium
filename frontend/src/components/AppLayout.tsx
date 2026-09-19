@@ -1,11 +1,18 @@
 import { Outlet, useNavigate, Link } from 'react-router-dom'
-import { AppShell, Burger, Group, Title, Text, Button, NavLink as MantineNavLink } from '@mantine/core'
+import { AppShell, Box, Burger, Group, Title, Text, Button, NavLink as MantineNavLink } from '@mantine/core'
 import { useDisclosure } from '@mantine/hooks'
-import { IconCpu, IconFolder, IconMessageChatbot, IconPlugConnected, IconSettings } from '@tabler/icons-react'
+import {
+  IconBrain,
+  IconCpu,
+  IconFolder,
+  IconPlugConnected,
+  IconSettings,
+} from '@tabler/icons-react'
 import { useAuth } from '../contexts/AuthContext'
 
 const NAV = [
-  { to: '/', label: '对话工作台', icon: IconMessageChatbot },
+  { to: '/', label: '对话工作台', icon: IconCpu },
+  { to: '/assistants', label: 'AI 助手', icon: IconBrain },
   { to: '/projects', label: '工程文件', icon: IconFolder },
   { to: '/connections', label: 'Altium 连接', icon: IconPlugConnected },
   { to: '/settings', label: '设置', icon: IconSettings },
@@ -26,9 +33,13 @@ export function AppLayout() {
         <Group h="100%" px="md" justify="space-between">
           <Group>
             <Burger opened={opened} onClick={toggle} hiddenFrom="sm" size="sm" />
-            <IconCpu size={22} />
-            <Title order={4}>AIDriveAltium</Title>
-            <Text size="xs" c="dimmed">
+            <Box className="ai-gradient" style={{ width: 32, height: 32, borderRadius: 10, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <IconCpu size={19} color="#fff" />
+            </Box>
+            <Title order={4} style={{ letterSpacing: '-0.01em' }}>
+              AIDriveAltium
+            </Title>
+            <Text size="xs" c="dimmed" visibleFrom="md">
               大模型辅助硬件设计
             </Text>
           </Group>
@@ -56,7 +67,7 @@ export function AppLayout() {
             to={item.to}
             label={item.label}
             leftSection={<item.icon size={18} />}
-            style={{ borderRadius: 8, marginBottom: 2 }}
+            style={{ borderRadius: 10, marginBottom: 2 }}
           />
         ))}
       </AppShell.Navbar>

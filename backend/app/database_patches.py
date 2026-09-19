@@ -11,6 +11,7 @@ _STATEMENTS = [
     "ALTER TABLE alt_connections ADD COLUMN IF NOT EXISTS last_checked_at TIMESTAMPTZ",
     "ALTER TABLE alt_connections ADD COLUMN IF NOT EXISTS last_error TEXT DEFAULT ''",
     "ALTER TABLE alt_connections ADD COLUMN IF NOT EXISTS info JSONB DEFAULT '{}'::jsonb",
+    "ALTER TABLE ai_conversations ADD COLUMN IF NOT EXISTS assistant_id UUID",
 ]
 
 

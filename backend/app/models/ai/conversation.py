@@ -15,6 +15,7 @@ class Conversation(UUIDPkMixin, TimestampMixin, SoftDeleteMixin, Base):
     title: Mapped[str] = mapped_column(String(200), default="新对话", nullable=False)
     project_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("fls_projects.id"), nullable=True)
     model_config_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("ai_model_configs.id"), nullable=True)
+    assistant_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
     skill: Mapped[str] = mapped_column(String(50), default="", nullable=False)
     message_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 

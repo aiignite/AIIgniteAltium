@@ -70,10 +70,21 @@ export const api = {
   },
 }
 
+export interface ActivatedSkill {
+  code: string
+  name: string
+  description?: string
+  score?: number
+  reasons?: string[]
+}
+
 export interface ChatStreamEvent {
-  type: 'meta' | 'delta' | 'error' | 'done'
+  type: 'meta' | 'delta' | 'error' | 'done' | 'skills_activated'
   conversationId?: string
   title?: string
+  assistantId?: string | null
+  assistantName?: string | null
+  skills?: ActivatedSkill[]
   text?: string
   message?: string
   messageId?: string

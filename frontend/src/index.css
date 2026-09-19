@@ -5,16 +5,150 @@ body,
   height: 100%;
 }
 
-.chat-message-user {
-  background: var(--mantine-color-indigo-1);
-}
-
-.chat-message-assistant {
-  background: var(--mantine-color-gray-1);
-}
-
 .svg-viewer svg {
   max-width: 100%;
   height: auto;
   background: #fff;
+}
+
+/* ===== AIIgnitePLM 风格：AI 助手界面基类 ===== */
+.ai-gradient {
+  background: linear-gradient(135deg, #3b82f6 0%, #4f46e5 100%);
+}
+
+.ai-gradient-emerald {
+  background: linear-gradient(135deg, #10b981 0%, #0d9488 100%);
+}
+
+.ai-avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  background: linear-gradient(135deg, #3b82f6 0%, #4f46e5 100%);
+  border-radius: 10px;
+  flex-shrink: 0;
+}
+
+/* 消息气泡：全宽卡片式 */
+.ai-bubble {
+  border-radius: 16px;
+  padding: 10px 16px;
+  font-size: 13.5px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ai-bubble-user {
+  background: linear-gradient(135deg, #3b82f6 0%, #6366f1 100%);
+  color: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+.ai-bubble-assistant {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+
+/* 技能激活卡（emerald） */
+.ai-skill-card {
+  background: #ecfdf5;
+  border: 1px solid #a7f3d0;
+  border-radius: 10px;
+  color: #047857;
+}
+
+/* 技能胶囊/候选条 */
+.ai-skill-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 500;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  color: #2563eb;
+  max-width: 220px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.ai-quick-chip {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 10.5px;
+  line-height: 20px;
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  color: #4b5563;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.ai-quick-chip:hover {
+  border-color: #93c5fd;
+  background: #eff6ff;
+  color: #2563eb;
+}
+
+/* 徽标（默认/系统/自定义） */
+.ai-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.ai-badge-default {
+  background: linear-gradient(135deg, #fffbeb, #fff7ed);
+  border: 1px solid rgba(253, 230, 138, 0.5);
+  color: #b45309;
+}
+
+.ai-badge-system {
+  background: linear-gradient(135deg, #eff6ff, #eef2ff);
+  border: 1px solid rgba(191, 219, 254, 0.5);
+  color: #1d4ed8;
+}
+
+.ai-badge-custom {
+  background: linear-gradient(135deg, #faf5ff, #fdf4ff);
+  border: 1px solid rgba(233, 213, 255, 0.5);
+  color: #9333ea;
+}
+
+/* 助手管理卡片 hover 光斑 */
+.ai-card-glow {
+  position: relative;
+  overflow: hidden;
+}
+
+.ai-card-glow::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 128px;
+  height: 128px;
+  background: radial-gradient(circle, rgba(16, 185, 129, 0.06), transparent 70%);
+  border-radius: 9999px;
+  transform: translate(64px, -64px);
+  transition: transform 0.7s;
+  pointer-events: none;
+}
+
+.ai-card-glow:hover::after {
+  transform: translate(32px, -32px) scale(1.6);
 }

@@ -48,6 +48,10 @@ async def bootstrap() -> None:
                 )
             )
             logger.info("已内置 mock 模型")
+
+        from app.services.ai.seed_data import seed_skills_and_assistants
+
+        await seed_skills_and_assistants(db)
         await db.commit()
 
 
