@@ -1,0 +1,10 @@
+Metadata-Version: 2.4
+Name: altium-gateway
+Version: 0.2.0
+Summary: AIDriveAltium gateway: DelphiScript bridge + MCP server + REST API for live Altium Designer control
+Requires-Python: >=3.10
+Requires-Dist: fastapi>=0.115
+Requires-Dist: uvicorn[standard]>=0.30
+Requires-Dist: httpx>=0.27
+Requires-Dist: mcp>=1.2.0
+Requires-Dist: pillow>=10.0

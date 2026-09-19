@@ -1,0 +1,23 @@
+[project]
+name = "altium-gateway"
+version = "0.2.0"
+description = "AIDriveAltium gateway: DelphiScript bridge + MCP server + REST API for live Altium Designer control"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "httpx>=0.27",
+    "mcp>=1.2.0",
+    "pillow>=10.0",
+]
+
+[project.scripts]
+altium-gateway = "altium_gateway.app:main"
+altium-gateway-mcp = "altium_gateway.mcp_server:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["altium_gateway*"]

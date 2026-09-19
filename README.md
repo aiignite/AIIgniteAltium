@@ -58,6 +58,7 @@ docker compose up -d --build
 
 ## 路线图
 
-- **第二步**：altium-gateway（Windows + Altium）：DelphiScript 脚本桥 + MCP server + 连接管理
+- ✅ **第一阶段**：平台前后端 + Altium 文件离线读取查看（本仓库主体）
+- ✅ **第二步**：Altium 实时连接 —— [gateway/](gateway/README.md)（Windows 部署：DelphiScript 驻留脚本 AIDriveBridge + 文件乒乓桥 + 8 个只读命令 + MCP server + REST），平台「Altium 连接」页测试/实时面板/截图，对话自动注入实时上下文
 - 第三步：规则引擎（ERC/DRC/DFM）+ AI 审查报告 + RAG 知识库
 - 第四步：元件选型/BOM 风险；第五步：写命令（意图命令层 + dry-run 确认 + 审计）

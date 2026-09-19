@@ -3,6 +3,40 @@
 from typing import Any
 
 
+def live_summary_to_context(summary: dict[str, Any]) -> str:
+    """gateway 实时摘要 → 提示词上下文文本。"""
+    if not summary or not summary.get("ok"):
+        return ""
+    lines: list[str] = ["（实时连接 · Altium 当前打开的设计）"]
+    lines.append(f"工程: {summary.get('project') or '?'}")
+    doc = summary.get("document") or {}
+    if doc.get("kind"):
+        lines.append(f"活动文档: [{doc.get('kind')}] {doc.get('name', '')}")
+    stats = summary.get("pcbStats") or {}
+    if stats:
+        lines.append(
+            f"PCB: 元件 {stats.get('components', '?')} / 焊盘 {stats.get('pads', '?')} / "
+            f"走线 {stats.get('tracks', '?')} / 过孔 {stats.get('vias', '?')} / 网络 {stats.get('nets', '?')}"
+        )
+    board = summary.get("board") or {}
+    if board.get("widthMils"):
+        lines.append(f"板框: {board['widthMils']} x {board.get('heightMils', '?')} mil, {board.get('layers', '?')} 层")
+    sch = summary.get("schematic") or {}
+    comps = sch.get("components") or []
+    if comps:
+        comp_text = ", ".join(
+            f"{c.get('designator', '?')}({c.get('value', '') or c.get('footprint', '')})" for c in comps[:12]
+        )
+        lines.append(f"原理图元件(前{len(comps[:12])}个): {comp_text}")
+    nets = sch.get("nets") or []
+    if nets:
+        lines.append("网络: " + ", ".join(f"{n.get('name')}({n.get('count')})" for n in nets[:12]))
+    errors = summary.get("errors") or []
+    for e in errors[:3]:
+        lines.append(f"注意: {e}")
+    return "\n".join(lines)
+
+
 def build_design_context(snapshot: dict[str, Any], max_components: int = 25, max_nets: int = 30) -> str:
     if not snapshot:
         return ""

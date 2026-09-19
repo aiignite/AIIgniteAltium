@@ -18,6 +18,9 @@ logger = logging.getLogger(__name__)
 async def bootstrap() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        from app.database_patches import ensure_extra_columns
+
+        await ensure_extra_columns(conn)
     async with async_session_maker() as db:
         result = await db.execute(select(User).where(User.email == settings.admin_email.lower()))
         admin = result.scalars().first()

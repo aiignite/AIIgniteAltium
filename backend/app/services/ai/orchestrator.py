@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.database import async_session_maker
 from app.models.ai.ai_model import AIModelConfig
 from app.models.ai.conversation import Conversation, Message
 from app.models.files.uploaded_project import UploadedProject
@@ -18,6 +19,33 @@ from app.services.ai.skill_registry import get_skill
 logger = logging.getLogger(__name__)
 
 MAX_HISTORY_MESSAGES = 20
+
+
+async def _try_live_context() -> str:
+    """无离线工程时，尝试从已连接 gateway 取实时设计摘要（失败静默）。"""
+    try:
+        from sqlalchemy import select
+
+        from app.models.altium.connection import GatewayConnection
+        from app.services.ai.design_context import live_summary_to_context
+
+        async with async_session_maker() as session:
+            result = await session.execute(
+                select(GatewayConnection)
+                .where(GatewayConnection.status == "connected", GatewayConnection.is_deleted.is_(False))
+                .order_by(GatewayConnection.created_at)
+                .limit(1)
+            )
+            conn = result.scalars().first()
+        if conn is None:
+            return ""
+        from app.services.altium.gateway_client import GatewayClient
+
+        summary = await GatewayClient(conn.base_url, conn.api_token).live_summary()
+        return live_summary_to_context(summary)
+    except Exception as exc:  # noqa: BLE001 —— 实时上下文失败不影响对话
+        logger.info("live context unavailable: %s", exc)
+        return ""
 
 
 async def resolve_model_config(db: AsyncSession, model_config_id: UUID | None) -> AIModelConfig:
@@ -52,12 +80,15 @@ async def build_messages(
 ) -> tuple[list[dict], str]:
     skill = get_skill(conversation.skill)
     system = skill.system_prompt
+    context_text = ""
     if project_id is not None:
         project = await db.get(UploadedProject, project_id)
         if project is not None and project.snapshot:
             context_text = build_design_context(project.snapshot)
-            if context_text:
-                system += "\n\n【设计上下文】\n" + context_text
+    else:
+        context_text = await _try_live_context()
+    if context_text:
+        system += "\n\n【设计上下文】\n" + context_text
 
     result = await db.execute(
         select(Message)

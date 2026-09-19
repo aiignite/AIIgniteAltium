@@ -1,0 +1,3 @@
+[console_scripts]
+altium-gateway = altium_gateway.app:main
+altium-gateway-mcp = altium_gateway.mcp_server:main
