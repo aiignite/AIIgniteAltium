@@ -1,0 +1,48 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: aidrive
+      POSTGRES_PASSWORD: aidrive_altium_dev
+      POSTGRES_DB: aidrive_altium
+    ports:
+      - "5433:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aidrive -d aidrive_altium"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"
+
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+asyncpg://aidrive:aidrive_altium_dev@postgres:5432/aidrive_altium
+      SECRET_KEY: change-me-in-production
+      ADMIN_EMAIL: admin@example.com
+      ADMIN_PASSWORD: admin123456
+      DATA_DIR: /data
+    volumes:
+      - app_data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "3295:3295"
+
+  frontend:
+    build: ./frontend
+    depends_on:
+      - backend
+    ports:
+      - "3290:80"
+
+volumes:
+  pg_data:
+  app_data:

@@ -1,0 +1,20 @@
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+}
+
+.chat-message-user {
+  background: var(--mantine-color-indigo-1);
+}
+
+.chat-message-assistant {
+  background: var(--mantine-color-gray-1);
+}
+
+.svg-viewer svg {
+  max-width: 100%;
+  height: auto;
+  background: #fff;
+}

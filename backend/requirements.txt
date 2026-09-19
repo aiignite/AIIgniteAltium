@@ -1,0 +1,12 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+sqlalchemy[asyncio]>=2.0.30
+asyncpg>=0.29
+aiosqlite>=0.20
+pydantic>=2.7
+pydantic-settings>=2.2
+python-jose[cryptography]>=3.3
+bcrypt>=4.1
+httpx[socks]>=0.27
+python-multipart>=0.0.9
+altium-monkey>=2026.9
