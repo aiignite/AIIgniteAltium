@@ -5,7 +5,7 @@
 
 ```
 ┌──────────────────┐   REST/SSE   ┌──────────────────┐   REST/MCP   ┌─────────────────────┐
-│ React 前端 :3290  │ ──────────► │ FastAPI 后端 :3295 │ ──────────► │ altium-gateway :3296 │
+│ React 前端 :3340  │ ──────────► │ FastAPI 后端 :3345 │ ──────────► │ altium-gateway :3296 │
 │ 工作台/审查/连接   │             │ ai_engine/解析/RAG │             │ (Windows+Altium 机)  │
 └──────────────────┘             └──────────────────┘             └──────────┬──────────┘
       PostgreSQL+pgvector(:5432) · Redis                                     │ 文件乒乓(行式协议v1)
@@ -45,15 +45,15 @@ cp backend/.env.example backend/.env   # 修改 DATABASE_URL 指向你的 PG
 bash start.sh                          # 自动建 venv/建表/创建管理员/启动前后端
 ```
 
-- 前端：http://localhost:3290
-- 后端 API 文档：http://localhost:3295/docs
+- 前端：http://localhost:3340
+- 后端 API 文档：http://localhost:3345/docs
 - 默认管理员：`admin@example.com / admin123456`（`backend/.env` 可改）
 
 ## 二、Docker 一键部署
 
 ```bash
 docker compose up -d --build
-# 包含: pgvector/pg16 + redis + backend(:3295) + frontend(nginx :3290, /api 反代)
+# 包含: pgvector/pg16 + redis + backend(:3345) + frontend(nginx :3340, /altium/ 反代)
 ```
 
 ## 三、Altium 实时网关部署（Windows 机，示例 192.168.1.14）

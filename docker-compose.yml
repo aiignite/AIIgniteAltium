@@ -34,14 +34,14 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "3295:3295"
+      - "3345:3295"
 
   frontend:
     build: ./frontend
     depends_on:
       - backend
     ports:
-      - "3290:80"
+      - "3340:80"
 
 volumes:
   pg_data:

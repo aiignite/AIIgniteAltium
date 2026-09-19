@@ -1,4 +1,5 @@
-const BASE = '/api/v1'
+// 子路径部署（门户 /altium/）时 BASE_URL=/altium/ → API 走 /altium/api/v1
+const BASE = `${(import.meta.env.BASE_URL ?? '/').replace(/\/$/, '')}/api/v1`
 
 let token: string | null = localStorage.getItem('aidrive_token')
 

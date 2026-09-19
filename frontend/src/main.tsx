@@ -10,11 +10,11 @@ import { AuthProvider } from './contexts/AuthContext'
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <MantineProvider defaultColorScheme="auto">
-      <BrowserRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </BrowserRouter>
+    <BrowserRouter basename={import.meta.env.BASE_URL}>
+      <AuthProvider>
+        <App />
+      </AuthProvider>
+    </BrowserRouter>
     </MantineProvider>
   </StrictMode>,
 )

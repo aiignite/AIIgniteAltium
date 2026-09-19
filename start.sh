@@ -46,12 +46,12 @@ pkill -f "uvicorn app.main:app" 2>/dev/null || true
 pkill -f "vite" 2>/dev/null || true
 sleep 1
 
-# 4. 启动后端 (3295)
-echo "-- 启动后端 http://localhost:3295 …"
-nohup "$PY" -m uvicorn app.main:app --host 127.0.0.1 --port 3295 > /tmp/aidrive_backend.log 2>&1 &
+# 4. 启动后端 (3345)
+echo "-- 启动后端 http://localhost:3345 …"
+nohup "$PY" -m uvicorn app.main:app --host 127.0.0.1 --port 3345 > /tmp/aidrive_backend.log 2>&1 &
 
-# 5. 启动前端 (3290)
-echo "-- 启动前端 http://localhost:3290 …"
+# 5. 启动前端 (3340)
+echo "-- 启动前端 http://localhost:3340 …"
 cd "$ROOT/frontend"
 if [ ! -d node_modules ]; then
   echo "   安装前端依赖…"
@@ -62,7 +62,7 @@ nohup npm run dev > /tmp/aidrive_frontend.log 2>&1 &
 sleep 5
 echo
 echo "== 启动完成 =="
-echo "  前端:   http://localhost:3290"
-echo "  后端API: http://localhost:3295/docs"
+echo "  前端:   http://localhost:3340"
+echo "  后端API: http://localhost:3345/docs"
 echo "  默认管理员: admin@example.com / admin123456（见 backend/.env）"
 echo "  日志: /tmp/aidrive_backend.log /tmp/aidrive_frontend.log"

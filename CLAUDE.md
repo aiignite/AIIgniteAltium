@@ -1,7 +1,7 @@
 # CLAUDE.md — AIDriveAltium 工程约定速览
 
 ## 架构
-- 三层：React 前端(3290) ←REST/SSE→ FastAPI 后端(3295) →（第二步）altium-gateway(3296, Windows+Altium)
+- 三层：React 前端(3340, 门户子路径 /altium/) ←REST/SSE→ FastAPI 后端(3345) →（第二步）altium-gateway(3296, Windows+Altium)
 - 后端模块化单体，功能域分组：`models|services|routers/{group}/`，模块入口 `app/modules/{group}/__init__.py::register_routers`，注册于 `app/modules/__init__.py::ALL_MODULES`
 - 表前缀：sys_/ai_/alt_/rvw_/cmp_/bom_/knw_/fls_（见 docs/design/module-conventions.md）
 
@@ -20,4 +20,4 @@
 - gateway（Windows）+ DelphiScript 桥（文件乒乓 v1）+ MCP server；写命令走意图命令层（ADR-001），dry-run + 人工确认 + 审计
 
 ## 运行
-- `bash start.sh`；端口 3290/3295；库 aidrive_altium（pgvector 已启用）
+- `bash start.sh`；端口 3340/3345（门户子路径 /altium/）；库 aidrive_altium（pgvector 已启用）
