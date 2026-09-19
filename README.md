@@ -3,6 +3,9 @@
 通过 MCP / 离线解析双通道连接 Altium Designer 的大模型辅助硬件设计系统。
 当前进度：**第一阶段**（平台前后端 + Altium 文件离线读取查看）与**第二步**（Altium 实时连接）均已完成。
 
+- **生产环境**：https://www.aiignite.com.cn （门户 → AIDriveAltium 卡片"启动"，或直达 [/altium/](https://www.aiignite.com.cn/altium/)）
+- 服务器部署：`bash scripts/deploy-remote.sh`（rsync + docker compose，配置见 scripts/deploy.env.example）
+
 ```
 ┌──────────────────┐   REST/SSE   ┌──────────────────┐   REST/MCP   ┌─────────────────────┐
 │ React 前端 :3340  │ ──────────► │ FastAPI 后端 :3345 │ ──────────► │ altium-gateway :3296 │

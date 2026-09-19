@@ -10,3 +10,4 @@ backend/data/
 /tmp/
 .zcode/
 .venv-gw/
+scripts/deploy.env
