@@ -79,7 +79,15 @@ export interface ActivatedSkill {
 }
 
 export interface ChatStreamEvent {
-  type: 'meta' | 'delta' | 'error' | 'done' | 'skills_activated'
+  type:
+    | 'meta'
+    | 'delta'
+    | 'error'
+    | 'done'
+    | 'skills_activated'
+    | 'tool_call'
+    | 'tool_result'
+    | 'tool_confirmation_required'
   conversationId?: string
   title?: string
   assistantId?: string | null
@@ -89,6 +97,14 @@ export interface ChatStreamEvent {
   message?: string
   messageId?: string
   durationMs?: number
+  /** 工具名（tool_call / tool_result / tool_confirmation_required） */
+  tool?: string
+  /** 工具参数（tool_call / tool_confirmation_required） */
+  params?: Record<string, unknown>
+  /** 写操作预览文本（tool_confirmation_required） */
+  preview?: string
+  /** 工具执行结果（tool_result） */
+  result?: unknown
 }
 
 export async function streamChat(body: Record<string, unknown>, onEvent: (e: ChatStreamEvent) => void) {

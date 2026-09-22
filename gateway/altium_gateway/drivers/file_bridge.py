@@ -1,6 +1,8 @@
-"""文件乒乓驱动（live 模式）：与 Altium 内 DelphiScript 驻留脚本交换 req_/resp_ 文件。
+"""文件乒乓驱动（live 模式）：与 Altium 内 DelphiScript 驻留脚本交换
+固定文件名 request.txt / response.txt。
 
-时序：写 requests/req_<id>.txt → 轮询 responses/resp_<id>.txt → 解析 → 删除两文件。
+时序：写 requests/request.txt → 轮询 responses/response.txt → 解析 → 删除两文件。
+（使用固定文件名，规避 DelphiScript 侧 FindFirst/TSearchRec 目录枚举不可靠的问题。）
 """
 
 import logging
@@ -32,10 +34,17 @@ class FileBridgeDriver(AltiumDriver):
 
     def execute(self, ops: list[tuple[str, dict[str, Any]]]) -> list[dict[str, Any]]:
         self.ensure_dirs()
-        request_id = uuid.uuid4().hex[:12]
-        request_path = self.requests_dir / f"req_{request_id}.txt"
-        response_path = self.responses_dir / f"resp_{request_id}.txt"
+        request_path = self.requests_dir / "request.txt"
+        response_path = self.responses_dir / "response.txt"
+        # 清掉上一次残留，避免读到陈旧响应
+        for p in (response_path, request_path):
+            try:
+                p.unlink()
+            except OSError:
+                pass
         with self._lock:
+            request_path.write_text("", encoding="ascii")  # 先占位，防桥读到半写文件
+            request_id = uuid.uuid4().hex[:12]  # 必须非空，否则桥端 ReqId='' 会直接 Exit
             request_path.write_text(encode_request(request_id, ops), encoding="ascii")
             deadline = time.time() + self.timeout
             while time.time() < deadline:
@@ -55,7 +64,7 @@ class FileBridgeDriver(AltiumDriver):
                     ok, ordered = parse_response(text, len(ops))
                     return [r.to_payload() for r in ordered]
                 time.sleep(0.15)
-        logger.error("bridge timeout req=%s ops=%s", request_id, [o for o, _ in ops])
+        logger.error("bridge timeout ops=%s", [o for o, _ in ops])
         return [{"ok": False, "error": f"Altium 桥响应超时（>{self.timeout}s），请确认 Altium 内 AIDriveBridge 脚本正在运行"} for _ in ops]
 
     def is_alive(self) -> bool:

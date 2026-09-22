@@ -2,7 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Box,
   Button,
+  Card,
   Group,
+  Loader,
   Paper,
   ScrollArea,
   Select,
@@ -42,6 +44,26 @@ interface ChatMessage {
   error?: boolean
   skills?: ActivatedSkill[]
   assistantName?: string
+  /** 工具调用日志（tool_call / tool_result） */
+  toolLog?: ToolLogEntry[]
+  /** 待确认的写操作（tool_confirmation_required） */
+  confirmation?: ConfirmationRequest | null
+}
+
+interface ToolLogEntry {
+  name: string
+  params?: Record<string, unknown>
+  result?: unknown
+}
+
+interface ConfirmationRequest {
+  tool: string
+  params: Record<string, unknown>
+  preview?: string
+  /** 确认执行后的结果/错误 */
+  result?: unknown
+  error?: string
+  executing?: boolean
 }
 
 interface SkillItem {
@@ -90,6 +112,25 @@ function timeAgo(iso: string): string {
   return `${Math.floor(h / 24)} 天前`
 }
 
+function resultText(r: unknown): string {
+  if (typeof r === 'string') return r
+  if (r === undefined || r === null) return ''
+  try {
+    return JSON.stringify(r)
+  } catch {
+    return String(r)
+  }
+}
+
+function isToolOk(r: unknown): boolean {
+  if (r && typeof r === 'object') {
+    const rec = r as { ok?: unknown; success?: unknown; error?: unknown }
+    if (rec.error) return false
+    if (rec.ok === true || rec.success === true) return true
+  }
+  return true
+}
+
 export function WorkbenchPage() {
   const [projects, setProjects] = useState<ProjectSummary[]>([])
   const [projectId, setProjectId] = useState<string | null>(null)
@@ -106,6 +147,9 @@ export function WorkbenchPage() {
   const [conversations, setConversations] = useState<ConversationItem[]>([])
   const [showHistory, setShowHistory] = useState(false)
   const viewportRef = useRef<HTMLDivElement>(null)
+
+  // 实时 Altium 连接：有在线网关时，右侧优先显示 Altium 当前打开的 PCB。
+  const [liveConnId, setLiveConnId] = useState<string | null>(null)
 
   const assistant = useMemo(
     () => assistants.find((a) => a.id === assistantId) ?? assistants.find((a) => a.isDefault) ?? null,
@@ -133,6 +177,18 @@ export function WorkbenchPage() {
     })
     loadConversations()
   }, [loadConversations])
+
+  // 轮询检测实时网关连接：在线则右侧显示 Altium 当前打开的 PCB。
+  useEffect(() => {
+    const check = () =>
+      api
+        .get<{ connected: boolean; id?: string }>('/altium/connections/first-connected')
+        .then((c) => setLiveConnId(c?.connected ? (c.id ?? null) : null))
+        .catch(() => setLiveConnId(null))
+    check()
+    const t = window.setInterval(check, 5000)
+    return () => window.clearInterval(t)
+  }, [])
 
   useEffect(() => {
     viewportRef.current?.scrollTo({ top: viewportRef.current.scrollHeight })
@@ -262,6 +318,47 @@ export function WorkbenchPage() {
             }
             return next
           })
+        if (event.type === 'tool_call' && event.tool) {
+          setMessages((prev) => {
+            const next = [...prev]
+            const last = next[next.length - 1]
+            if (!last) return prev
+            next[next.length - 1] = {
+              ...last,
+              toolLog: [...(last.toolLog ?? []), { name: event.tool!, params: event.params }],
+            }
+            return next
+          })
+        }
+        if (event.type === 'tool_result' && event.tool) {
+          setMessages((prev) => {
+            const next = [...prev]
+            const last = next[next.length - 1]
+            if (!last) return prev
+            const log = last.toolLog ?? []
+            const idx = log.map((l) => l.name).lastIndexOf(event.tool!)
+            if (idx < 0) {
+              next[next.length - 1] = { ...last, toolLog: [...log, { name: event.tool!, result: event.result }] }
+            } else {
+              const updated = [...log]
+              updated[idx] = { ...updated[idx], result: event.result }
+              next[next.length - 1] = { ...last, toolLog: updated }
+            }
+            return next
+          })
+        }
+        if (event.type === 'tool_confirmation_required' && event.tool) {
+          setMessages((prev) => {
+            const next = [...prev]
+            const last = next[next.length - 1]
+            if (!last) return prev
+            next[next.length - 1] = {
+              ...last,
+              confirmation: { tool: event.tool!, params: event.params ?? {}, preview: event.preview },
+            }
+            return next
+          })
+        }
         if (event.type === 'error')
           setMessages((prev) => {
             const next = [...prev]
@@ -273,6 +370,48 @@ export function WorkbenchPage() {
     )
     setStreaming(false)
   }, [input, streaming, conversationId, projectId, assistant, selectedSkills, modelId, loadConversations])
+
+  // 写操作确认：直连后端命令代理执行（confirmed=true）
+  const confirmTool = useCallback(
+    async (i: number, conf: ConfirmationRequest) => {
+      if (streaming) return
+      setStreaming(true)
+      const finish = (patch: { result?: unknown; error?: string }) =>
+        setMessages((prev) => {
+          const next = [...prev]
+          const m = next[i]
+          if (m?.confirmation)
+            next[i] = { ...m, confirmation: { ...m.confirmation, executing: false, ...patch } }
+          return next
+        })
+      try {
+        const conn = await api.get<{ connected: boolean; id?: string }>('/altium/connections/first-connected')
+        if (!conn.connected || !conn.id) {
+          finish({ error: '没有已连接的 Altium 网关（请先在「实时连接」页配置并测试连接）' })
+          return
+        }
+        const payload = await api.post<Record<string, unknown>>(`/altium/connections/${conn.id}/command`, {
+          name: conf.tool,
+          params: { ...conf.params, confirmed: true },
+        })
+        finish({ result: payload })
+      } catch (e) {
+        finish({ error: e instanceof Error ? e.message : String(e) })
+      } finally {
+        setStreaming(false)
+      }
+    },
+    [streaming],
+  )
+
+  const cancelTool = useCallback((i: number) => {
+    setMessages((prev) => {
+      const next = [...prev]
+      const m = next[i]
+      if (m?.confirmation) next[i] = { ...m, confirmation: null }
+      return next
+    })
+  }, [])
 
   // 欢迎卡「建议这样提问」：绑定技能 → 技能式提问；否则通用引导
   const suggestions = useMemo(() => {
@@ -498,8 +637,93 @@ export function WorkbenchPage() {
                       className="ai-bubble ai-bubble-assistant"
                       style={m.error ? { border: '1px solid #fca5a5', background: '#fef2f2', color: '#b91c1c' } : undefined}
                     >
-                      {m.content || (streaming && i === messages.length - 1 ? '思考中…' : '')}
+                      {m.content || (streaming && i === messages.length - 1 && !m.confirmation ? '思考中…' : '')}
                     </Box>
+                    {(m.toolLog?.length ?? 0) > 0 && (
+                      <Box mt={4} style={{ fontSize: 11 }}>
+                        {m.toolLog!.map((t, ti) => (
+                          <Box
+                            key={ti}
+                            mb={2}
+                            style={{
+                              border: '1px solid #e5e7eb',
+                              borderRadius: 8,
+                              padding: '4px 8px',
+                              background: '#f9fafb',
+                            }}
+                          >
+                            <Text size="11px" fw={600}>
+                              {t.name}
+                            </Text>
+                            {t.params && Object.keys(t.params).length > 0 && (
+                              <Text size="10px" c="dimmed" style={{ wordBreak: 'break-all' }}>
+                                参数：{JSON.stringify(t.params)}
+                              </Text>
+                            )}
+                            {t.result !== undefined && (
+                              <Text
+                                size="10px"
+                                c="dimmed"
+                                style={{ wordBreak: 'break-all', color: isToolOk(t.result) ? '#047857' : undefined }}
+                              >
+                                结果：{resultText(t.result)}
+                              </Text>
+                            )}
+                          </Box>
+                        ))}
+                      </Box>
+                    )}
+                    {m.confirmation && (
+                      <Box
+                        mt={6}
+                        p="sm"
+                        style={{
+                          border: '1px solid #fbbf24',
+                          background: '#fffbeb',
+                          borderRadius: 10,
+                          fontSize: 12,
+                        }}
+                      >
+                        <Text size="11px" fw={700}>
+                          写操作需要确认：{m.confirmation.tool}
+                        </Text>
+                        {Object.keys(m.confirmation.params).length > 0 && (
+                          <Text size="10px" c="dimmed" style={{ wordBreak: 'break-all', marginTop: 2 }}>
+                            参数：{JSON.stringify(m.confirmation.params)}
+                          </Text>
+                        )}
+                        {m.confirmation.preview && (
+                          <Text size="11px" style={{ marginTop: 4 }}>
+                            预览：{m.confirmation.preview}
+                          </Text>
+                        )}
+                        {m.confirmation.result !== undefined && (
+                          <Text size="11px" style={{ marginTop: 4, color: isToolOk(m.confirmation.result) ? '#047857' : '#b91c1c' }}>
+                            执行结果：{resultText(m.confirmation.result)}
+                          </Text>
+                        )}
+                        {m.confirmation.error && (
+                          <Text size="11px" style={{ marginTop: 4, color: '#b91c1c' }}>
+                            {m.confirmation.error}
+                          </Text>
+                        )}
+                        {m.confirmation.result === undefined && !m.confirmation.error && (
+                          <Group gap={6} mt={6}>
+                            <Button
+                              size="compact-xs"
+                              color="green"
+                              loading={m.confirmation.executing}
+                              onClick={() => confirmTool(i, m.confirmation!)}
+                            >
+                              确认执行
+                            </Button>
+                            <Button size="compact-xs" variant="subtle" color="gray" onClick={() => cancelTool(i)}>
+                              取消
+                            </Button>
+                          </Group>
+                        )}
+                      </Box>
+                    )}
                   </Box>
                 ),
               )}
@@ -576,7 +800,9 @@ export function WorkbenchPage() {
 
       {/* ===== 右：设计数据 ===== */}
       <Box style={{ flex: 1, minWidth: 0, height: '100%' }} visibleFrom="md">
-        {projectId ? (
+        {liveConnId ? (
+          <LiveAltiumPanel connectionId={liveConnId} />
+        ) : projectId ? (
           <DesignDataTabs projectId={projectId} />
         ) : (
           <Paper withBorder p="xl" h="100%" radius="lg">
@@ -589,6 +815,114 @@ export function WorkbenchPage() {
         )}
       </Box>
     </Group>
+  )
+}
+
+interface LiveSummary {
+  ok: boolean
+  project?: string
+  document?: { kind?: string; name?: string }
+  pcbStats?: Record<string, number>
+  board?: { widthMils?: number; heightMils?: number; layers?: number }
+  schematic?: { componentCount?: number; netCount?: number }
+  errors?: string[]
+}
+
+function LiveAltiumPanel({ connectionId }: { connectionId: string }) {
+  const [summary, setSummary] = useState<LiveSummary | null>(null)
+  const [screenshot, setScreenshot] = useState<string | null>(null)
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(true)
+
+  const load = async () => {
+    setLoading(true)
+    setError('')
+    try {
+      const s = await api.get<LiveSummary>(`/altium/connections/${connectionId}/live/summary`)
+      setSummary(s)
+      const shot = await api.blob(`/altium/connections/${connectionId}/screenshot`)
+      setScreenshot((prev) => {
+        if (prev) URL.revokeObjectURL(prev)
+        return shot
+      })
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '实时面板加载失败')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    load()
+    const t = window.setInterval(load, 6000)
+    return () => {
+      window.clearInterval(t)
+      setScreenshot((p) => {
+        if (p) URL.revokeObjectURL(p)
+        return null
+      })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connectionId])
+
+  if (error) {
+    return (
+      <Paper withBorder p="md" radius="lg">
+        <Text c="red" size="sm">实时连接不可用：{error}</Text>
+      </Paper>
+    )
+  }
+  if (loading && !summary) {
+    return (
+      <Group justify="center" h="100%">
+        <Loader />
+      </Group>
+    )
+  }
+  return (
+    <Box h="100%" style={{ overflow: 'auto' }}>
+      <Group justify="space-between" mb="xs">
+        <Text fw={600} truncate style={{ maxWidth: '78%' }}>
+          {summary?.project ? `Altium 实时：${summary.project}` : 'Altium 实时（未打开工程）'}
+        </Text>
+        <Button size="compact-xs" variant="light" onClick={load}>
+          刷新
+        </Button>
+      </Group>
+      {summary?.document?.kind && (
+        <Text size="sm" c="dimmed" mb="xs">
+          活动文档：[{summary.document.kind}] {summary.document.name}
+        </Text>
+      )}
+      {summary?.pcbStats && (
+        <Group grow mb="sm">
+          {[
+            ['元件', summary.pcbStats.components],
+            ['焊盘', summary.pcbStats.pads],
+            ['走线', summary.pcbStats.tracks],
+            ['过孔', summary.pcbStats.vias],
+            ['网络', summary.pcbStats.nets],
+          ].map(([label, value]) => (
+            <Card withBorder p="xs" key={label as string}>
+              <Text size="xs" c="dimmed">
+                {label}
+              </Text>
+              <Text fw={700}>{String(value ?? '-')}</Text>
+            </Card>
+          ))}
+        </Group>
+      )}
+      {summary?.board?.widthMils && (
+        <Text size="xs" c="dimmed" mb="xs">
+          板框：{summary.board.widthMils} × {summary.board.heightMils ?? '?'} mil，{summary.board.layers ?? '?'} 层
+        </Text>
+      )}
+      {screenshot && (
+        <div className="svg-viewer" style={{ border: '1px solid var(--mantine-color-gray-3)' }}>
+          <img src={screenshot} alt="Altium 当前打开的设计" style={{ width: '100%' }} />
+        </div>
+      )}
+    </Box>
   )
 }
 

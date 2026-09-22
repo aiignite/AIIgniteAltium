@@ -1,5 +1,6 @@
 """编排器：助手人设 + 技能提示词 + 设计上下文 + 历史 → provider 流式输出。"""
 
+import json
 import logging
 import time
 from collections.abc import AsyncGenerator
@@ -271,15 +272,88 @@ async def stream_reply(
         await db.flush()
 
         accumulated: list[str] = []
-        async for delta in providers.stream_chat(
-            cfg.provider,
-            base_url=cfg.base_url or default_base_url(cfg.provider),
-            api_key=cfg.api_key,
-            model=cfg.model_name or "default",
-            messages=messages,
-        ):
-            accumulated.append(delta)
-            yield {"type": "delta", "text": delta}
+        tool_messages: list[dict] = []
+        tool_defs: list[dict] = []
+        try:
+            from app.ai_tools import sync_gateway_tools, tool_definitions
+
+            await sync_gateway_tools()
+            tool_defs = tool_definitions()
+        except Exception as exc:  # noqa: BLE001 —— 工具装配失败不影响普通对话
+            logger.info("tool setup skipped: %s", exc)
+
+        MAX_TOOL_ROUNDS = 5
+        for _round in range(MAX_TOOL_ROUNDS):
+            pending_calls: list[dict] | None = None
+            round_text: list[str] = []
+            async for event in providers.stream_chat(
+                cfg.provider,
+                base_url=cfg.base_url or default_base_url(cfg.provider),
+                api_key=cfg.api_key,
+                model=cfg.model_name or "default",
+                messages=messages + tool_messages,
+                tools=tool_defs or None,
+            ):
+                if event["type"] == "delta":
+                    round_text.append(event["text"])
+                    accumulated.append(event["text"])
+                    yield {"type": "delta", "text": event["text"]}
+                elif event["type"] == "tool_calls":
+                    pending_calls = event["calls"]
+            if not pending_calls:
+                if round_text:
+                    tool_messages.append({"role": "assistant", "content": "".join(round_text)})
+                break
+            tool_messages.append(
+                {
+                    "role": "assistant",
+                    "content": "".join(round_text) or None,
+                    "tool_calls": [
+                        {
+                            "id": c["id"],
+                            "type": "function",
+                            "function": {
+                                "name": c["name"],
+                                "arguments": json.dumps(c.get("arguments") or {}, ensure_ascii=False),
+                            },
+                        }
+                        for c in pending_calls
+                    ],
+                }
+            )
+            from app.ai_tools import registry
+
+            for call in pending_calls:
+                name = call.get("name", "")
+                args = call.get("arguments") or {}
+                yield {"type": "tool_call", "tool": name, "params": args}
+                meta = registry.get(name)
+                if meta is None:
+                    result = {"success": False, "error": f"未知工具: {name}"}
+                elif meta["requires_confirmation"]:
+                    try:
+                        preview_payload = await registry.execute(name, **{**args, "dry_run": True})
+                    except Exception as exc:  # noqa: BLE001
+                        preview_payload = {"error": f"预览失败: {exc}"}
+                    preview = preview_payload.get("preview") or preview_payload.get("error") or "（无预览）"
+                    yield {
+                        "type": "tool_confirmation_required",
+                        "tool": name,
+                        "params": args,
+                        "preview": preview,
+                    }
+                    result = {
+                        "success": False,
+                        "requiresConfirmation": True,
+                        "preview": preview,
+                        "error": "写操作待用户确认：确认后请回复「确认执行」",
+                    }
+                else:
+                    result = await registry.execute(name, **args)
+                    yield {"type": "tool_result", "tool": name, "result": result}
+                tool_messages.append(
+                    {"role": "tool", "tool_call_id": call["id"], "content": json.dumps(result, ensure_ascii=False)}
+                )
         full_text = "".join(accumulated)
         assistant_message.content = full_text
         assistant_message.duration_ms = int((time.time() - started) * 1000)

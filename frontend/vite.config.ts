@@ -2,7 +2,6 @@ import path from 'path';
 import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
 
-// 与 AIDriveEDA 相同的子路径模式：门户经 /altium/ 反代本服务
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '');
   const base = env.VITE_BASE_PATH || '/';
@@ -11,11 +10,11 @@ export default defineConfig(({ mode }) => {
   return {
     base,
     server: {
-      port: 3340,
+      port: 3290,
       host: '0.0.0.0',
       proxy: {
         [apiPrefix]: {
-          target: 'http://localhost:3345',
+          target: 'http://127.0.0.1:3295',
           changeOrigin: true,
           timeout: 600_000,
           rewrite: (p) =>
