@@ -1,98 +1,294 @@
 # AIDriveAltium · 大模型辅助硬件设计平台
 
-通过 MCP / 离线解析双通道连接 Altium Designer 的大模型辅助硬件设计系统。
-当前进度：**第一阶段**（平台前后端 + Altium 文件离线读取查看）与**第二步**（Altium 实时连接）均已完成。
+把 **Altium Designer 的设计数据**变成大模型可理解、可检索、可操作的上下文：离线文件解析 + 局域网实时桥 + 助手/技能编排 + 带确认的 AI 工具调用。
 
-- **生产环境**：https://www.aiignite.com.cn （门户 → AIDriveAltium 卡片"启动"，或直达 [/altium/](https://www.aiignite.com.cn/altium/)）
-- 服务器部署：`bash scripts/deploy-remote.sh`（rsync + docker compose，配置见 scripts/deploy.env.example）
+- **生产环境**：<https://www.aiignite.com.cn>（门户 → AIDriveAltium 卡片「启动」，或直达 [/altium/](https://www.aiignite.com.cn/altium/)）
+- **当前进度**：第一阶段（平台前后端 + Altium 文件离线读取/查看）与第二阶段（实时连接 + AI 工具链首版）均已完成，详见[路线图](#路线图)。
+- **本地入口**：前端 `http://localhost:3290`（dev）/ `http://localhost:3340`（容器），后端 `http://localhost:3295/docs`（dev）/ `http://localhost:3345`（容器）。
 
 ```
-┌──────────────────┐   REST/SSE   ┌──────────────────┐   REST/MCP   ┌─────────────────────┐
-│ React 前端 :3340  │ ──────────► │ FastAPI 后端 :3345 │ ──────────► │ altium-gateway :3296 │
-│ 工作台/审查/连接   │             │ ai_engine/解析/RAG │             │ (Windows+Altium 机)  │
-└──────────────────┘             └──────────────────┘             └──────────┬──────────┘
-      PostgreSQL+pgvector(:5432) · Redis                                     │ 文件乒乓(行式协议v1)
-                                                              Altium 内 AIDriveBridge 驻留脚本
+┌──────────────────────┐   REST / SSE    ┌───────────────────────┐   REST   ┌────────────────────────┐
+│ React 前端            │ ──────────────► │ FastAPI 后端           │ ───────► │ altium-gateway :3296    │
+│ 工作台/工程/AI/连接    │                 │ AI 编排 · 解析 · 数据  │          │ Windows + Altium 机器   │
+└──────────────────────┘                 └───────────┬───────────┘          └───────────┬────────────┘
+                                                     │ 子进程（AGPL 隔离）               │ 文件乒乓（行式协议 v1）
+                                                     ▼                                  ▼
+                                       ┌───────────────────────┐            Altium 内 AIDriveBridge
+                                       │ altium_files_worker   │            驻留脚本（TForm + TTimer）
+                                       │ altium-monkey 解析渲染 │
+                                       └───────────────────────┘
+          PostgreSQL(+pgvector) / SQLite · Redis（预留）        MCP 客户端（Claude Desktop 等）──MCP──► gateway
 ```
 
-## 技术栈
+## 功能总览
 
-- 后端：FastAPI + SQLAlchemy 2.0 async + PostgreSQL(pgvector) + 隔离解析 worker（altium-monkey，子进程，ADR-002）
-- 前端：React 19 + TypeScript + Vite + Mantine 9
-- AI 引擎：多 provider（mock / OpenAI 兼容 / Anthropic）、技能注册表、SSE 流式对话、设计上下文注入（离线快照 + 实时摘要双通道）
-- 实时连接：altium-gateway（DelphiScript 驻留脚本 + 文件乒乓桥 + 8 只读命令 + MCP server）
+| 能力 | 状态 | 说明 |
+|---|---|---|
+| 用户认证 | ✅ | JWT（HS256）注册/登录，启动时幂等创建管理员 |
+| 工程文件离线解析 | ✅ | 上传 `.PrjPcb/.SchDoc/.PcbDoc/.SchLib/.PcbLib`（也接受 `aidrive.snapshot.v0` JSON），隔离子进程解析为归一化快照 |
+| 可视化查看 | ✅ | 原理图 SVG、PCB SVG、元件/网络/BOM 表格（搜索、分页、排序、单端网络标记、引脚明细） |
+| AI 对话 | ✅ | 助手人设 + 技能提示词 + 设计上下文 + SSE 流式；对话历史持久化 |
+| AI 助手 | ✅ | 角色描述、系统提示词、推荐技能、绑定模型；系统助手可编辑、可设默认、不可删 |
+| 技能库 | ✅ | 任务级提示词模板 CRUD + 关键词打分编排（`POST /ai/skills/resolve`） |
+| 模型管理 | ✅ | `mock` / OpenAI 兼容（含 Ollama）/ Anthropic，默认模型切换 |
+| AI 工具调用 | ✅ | 拉取 gateway 工具清单动态注册，最多 5 轮工具循环；写操作必须先预览、再人工确认 |
+| Altium 实时连接 | ✅ | 连接 CRUD/测试、实时摘要、实时截图、工作台右侧实时 PCB 面板 |
+| 写命令（首版） | ✅ | 高亮网络 / 移动元件 / 旋转元件：`dry_run` 预览 → `confirmed` 执行 |
+| MCP 服务 | ✅ | gateway 提供 stdio MCP server（8 个查询工具）；HTTP 方式需单独启动 |
+| 规则引擎 / RAG / 选型 | 规划中 | 见[路线图](#路线图) |
 
----
+## 系统架构
 
-## 一、本地开发部署（macOS/Linux）
+### 端口与地址
 
-### 1. 数据库安装
+| 组件 | 本地开发 | 容器 / 生产 | 说明 |
+|---|---|---|---|
+| 前端（Vite / nginx） | **3290** | **3340** → 容器 `80` | 门户子路径 `/altium/`；`vite.config.ts` 固定 dev 端口 3290 |
+| 后端（FastAPI） | **3295** | **3345** → 容器 `3295` | 业务前缀 `/api/v1`，文档 `/docs` |
+| altium-gateway | **3296** | — | 部署在装有 Altium 的 Windows 机器 |
+| PostgreSQL | `5432` | `5433` → `5432` | Docker 用 `pgvector/pgvector:pg16` |
+| Redis | — | `6380` → `6379` | 依赖已编排，业务代码暂未使用 |
+| SQLite | `backend/aidrive_altium.db` | — | 仓库内 `backend/.env` 当前使用，免数据库快速体验 |
 
-任选其一：
+> **端口口径**：开发态（`npm run dev` + `uvicorn`）是 3290/3295，容器/生产是 3340/3345，二者通过 compose 端口映射与 nginx 反代对应。`start.sh` 目前按 3345/3340 启动，与 `vite.config.ts` 的 3290/3295 不一致，见[已知限制](#已知限制与待办)。
 
-```bash
-# 方式 A：本机 Homebrew PostgreSQL
-brew install postgresql@17 && brew services start postgresql@17
-createdb -U postgres aidrive_altium
-psql -U postgres -d aidrive_altium -c "CREATE EXTENSION IF NOT EXISTS vector"   # pgvector，供后续 RAG
+### 分层职责
 
-# 方式 B：Docker（仅数据库）
-docker compose up -d postgres redis
-# 连接串: postgresql+asyncpg://aidrive:aidrive_altium_dev@localhost:5433/aidrive_altium
+- **前端**：React 19 + Mantine 9，单页应用（工作台、AI 助手、工程文件、Altium 连接、设置）。
+- **后端**：模块化单体，按功能域分组（`system / ai / files / altium`），统一 `/api/v1` 前缀；AI 编排、文件解析调度、连接代理都在这一层。
+- **解析 worker**：独立子进程，只 import `altium_monkey`，与后端通过 `job.json → result.json` 交换（AGPL 隔离，见 [ADR-002](docs/design/adr/ADR-002-altium-monkey-offline-engine.md)）。
+- **gateway**：命令层（语义命令 → 桥 ops）+ 驱动层（mock / 文件乒乓）+ REST + MCP，部署在 Altium 机器上。
+- **桥脚本**：Altium 内 DelphiScript 驻留窗口，轮询 `Documents\AltiumBridge\requests`，按行式协议回写 `responses`。
+
+### 技术栈
+
+- 后端：FastAPI、SQLAlchemy 2.0 async、Pydantic v2、python-jose + bcrypt、httpx、`altium-monkey>=2026.9`
+- 前端：React 19、TypeScript、Vite、Mantine 9、Tabler Icons、react-router 7、oxlint
+- 数据：PostgreSQL 16 + pgvector（生产）/ SQLite（本地兜底）
+- 网关：FastAPI、uvicorn、httpx、`mcp`（FastMCP）、Pillow；DelphiScript 桥脚本
+
+## 目录结构
+
+```
+AIDriveAltium/
+├─ backend/
+│  ├─ app/
+│  │  ├─ main.py                 # 应用装配、启动引导（建表/管理员/mock 模型/种子）
+│  │  ├─ config.py               # 环境变量配置（.env）
+│  │  ├─ database.py             # async engine / session
+│  │  ├─ schemas.py              # CamelModel（响应 camelCase）
+│  │  ├─ security.py             # JWT 与密码哈希
+│  │  ├─ modules/<group>/        # 路由注册入口（ALL_MODULES）
+│  │  ├─ routers/{system,ai,files,altium}/
+│  │  ├─ services/{ai,files,altium}/
+│  │  │  ├─ ai/orchestrator.py   # 提示词组装、工具循环、SSE 事件
+│  │  │  ├─ ai/providers.py      # mock / OpenAI 兼容 / Anthropic 流式
+│  │  │  ├─ ai/design_context.py # 快照/实时摘要 → 上下文文本
+│  │  │  ├─ files/parse_service.py
+│  │  │  └─ altium/gateway_client.py
+│  │  ├─ ai_tools/__init__.py    # ToolRegistry + gateway 工具同步
+│  │  ├─ worker/altium_files_worker.py
+│  │  ├─ models/{system,ai,altium,files}/
+│  │  └─ database_patches.py     # 过渡期幂等补列（PG）
+│  ├─ requirements.txt
+│  ├─ Dockerfile                 # 容器内监听 3295
+│  └─ .env.example
+├─ frontend/
+│  ├─ src/pages/                 # Workbench / Projects / ProjectDetail / Assistants / Connections / Settings / Login
+│  ├─ src/components/            # AppLayout、DesignDataTabs、ai/*
+│  ├─ src/api/client.ts          # REST + SSE 客户端
+│  ├─ nginx.conf                 # 子路径与 API 反代、SSE 关闭缓冲
+│  ├─ vite.config.ts
+│  └─ Dockerfile
+├─ gateway/
+│  ├─ altium_gateway/
+│  │  ├─ app.py                  # REST（:3296）
+│  │  ├─ commands.py             # 命令注册表 + dry-run + 确认
+│  │  ├─ protocol.py             # 行式协议 v1 编解码
+│  │  ├─ drivers/{base,mock,file_bridge}.py
+│  │  └─ mcp_server.py           # stdio MCP server
+│  ├─ altium_scripts/AIDriveBridge.*   # DelphiScript 驻留脚本（.PrjScr）
+│  ├─ deploy/{install.bat,start_gateway.bat}
+│  ├─ tests/test_protocol_mock.py      # 12 个协议/命令/mock 用例
+│  └─ README.md
+├─ docs/design/                  # 设计分析、ADR、模块规范、阶段审计
+├─ scripts/                      # deploy-remote.sh、deploy.env.example
+├─ docker-compose.yml
+├─ start.sh                      # macOS/Linux 一键启动（bash）
+└─ CLAUDE.md                     # 工程约定速览
 ```
 
-### 2. 配置与启动
+## 快速开始
 
-```bash
-cp backend/.env.example backend/.env   # 修改 DATABASE_URL 指向你的 PG
-bash start.sh                          # 自动建 venv/建表/创建管理员/启动前后端
-```
-
-- 前端：http://localhost:3340
-- 后端 API 文档：http://localhost:3345/docs
-- 默认管理员：`admin@example.com / admin123456`（`backend/.env` 可改）
-
-## 二、Docker 一键部署
+### 方式一：Docker Compose（含数据库，最接近生产）
 
 ```bash
 docker compose up -d --build
-# 包含: pgvector/pg16 + redis + backend(:3345) + frontend(nginx :3340, /altium/ 反代)
 ```
 
-## 三、Altium 实时网关部署（Windows 机，示例 192.168.1.14）
+> Compose 已为后端注入数据库地址、`SECRET_KEY` 与管理员账号；如需改端口或密钥，直接编辑 `docker-compose.yml`。
 
-> 完整文档见 [gateway/README.md](gateway/README.md)。网关支持 mock 模式，**无 Altium 也可先联调**。
+启动内容：`pgvector/pg16` + `redis` + 后端（宿主 `3345`）+ 前端（宿主 `3340`，nginx 反代 `/api`、SSE 关闭缓冲、上传上限 100MB）。
 
-### 前置条件
+- 前端：<http://localhost:3340/>（门户方式访问 `/altium/`）
+- API 文档：<http://localhost:3345/docs>
+- 默认管理员：`admin@example.com / admin123456`（首次启动自动创建）
 
-- Windows 10/11 + Altium Designer（已安装）
-- Python 3.10+（勾选 Add to PATH）
-- 与运行平台的主机同一局域网
+### 方式二：本地开发（macOS / Linux）
 
-### 部署步骤
+```bash
+# 1) 数据库（二选一）
+# A. 本机 PostgreSQL + pgvector
+brew install postgresql@17 && brew services start postgresql@17
+createdb -U postgres aidrive_altium
+psql -U postgres -d aidrive_altium -c "CREATE EXTENSION IF NOT EXISTS vector"
 
-1. **拷贝** `gateway/` 整个目录到 Windows 机，如 `D:\altium-gateway`
-2. **右键以管理员身份运行** `gateway\deploy\install.bat`
-   （创建 venv、pip 安装、`netsh advfirewall` 放行 TCP 3296 入站）
-3. **双击** `gateway\deploy\start_gateway.bat`（`ALTIUM_MODE=live`，监听 :3296）
-4. **Altium 内运行驻留脚本**：`File ▸ Open ▸ Script Project...` 打开
-   `gateway\altium_scripts\AIDriveBridge.PrjSrc` → 在脚本面板运行 `RunAIDriveBridge`
-   → 弹出桥窗口保持打开（轮询默认自动启动）
+# B. 仅数据库用 Docker
+docker compose up -d postgres redis
+# DATABASE_URL=postgresql+asyncpg://aidrive:aidrive_altium_dev@localhost:5433/aidrive_altium
 
-### 平台侧接入
+# 2) 后端
+python3 -m venv .venv
+.venv/bin/python -m pip install -r backend/requirements.txt
+cp backend/.env.example backend/.env      # 修改 DATABASE_URL
+cd backend && ../.venv/bin/python -m uvicorn app.main:app --port 3295 --reload
 
-1. 平台「**Altium 连接**」页 → 新增连接，Base URL 填 `http://192.168.1.14:3296`
-2. 点 **测试连接** → 状态变"已连接 / Altium 在线"
-3. 点 **实时面板**（眼睛图标）→ 查看当前工程、PCB 统计与实时截图
-4. 工作台对话**不选工程**时，自动注入实时设计上下文（当前打开的工程/元件/网络/统计）
+# 3) 前端（新终端）
+cd frontend
+npm install
+npm run dev                                # http://localhost:3290
+```
 
-### 防火墙与连通性排查
+`bash start.sh` 会建 venv、检查数据库、启动前后端；注意它按 `3345/3340` 启动，而 Vite dev server 监听 `3290` 并代理到 `3295`，两者需对齐后再使用（见已知限制）。
 
-- 安装脚本已放行 3296；如仍不通，在 Windows 上检查：`netstat -ano | findstr 3296`、
-  防火墙配置文件（公用/专用网络）、以及两机是否同网段（`ping` 默认被 Windows 拦截不代表离线）
-- `ALTIUM_MODE=live` 时网关与 Altium 脚本通过 `%USERPROFILE%\Documents\AltiumBridge` 目录交换请求/响应
+### 方式三：本地开发（Windows PowerShell）
 
-### MCP 客户端接入（Claude Desktop / ZCode）
+```powershell
+# 1) 依赖
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
+
+# 2) 配置（默认 SQLite，可省去 PostgreSQL）
+Copy-Item backend\.env.example backend\.env
+# 修改 backend\.env：DATABASE_URL=sqlite+aiosqlite:///./aidrive_altium.db
+
+# 3) 后端（终端 A）
+Set-Location backend
+..\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 3295 --reload
+
+# 4) 前端（终端 B）
+Set-Location frontend
+npm install
+npm run dev        # http://localhost:3290
+```
+
+> SQLite 模式下 `database_patches.ensure_extra_columns` 的 PG 语句会被跳过；首次建表由 `create_all()` 完成，功能不受影响（pgvector 仅后续 RAG 需要）。
+
+### 首次使用
+
+1. 打开前端 → 用默认管理员登录（或注册新账号）。
+2. 「工程文件」→ 上传 Altium 工程文件 → 后台解析 → 查看原理图/PCB/元件/网络/BOM。
+3. 「对话工作台」→ 选择助手、关联工程、按需勾选技能 → 提问（无 API Key 时走内置 mock 引擎）。
+4. 「Altium 连接」→ 填写网关地址（如 `http://192.168.1.14:3296`）→ 测试连接 → 实时面板。
+5. 连接在线时，工作台右侧自动显示 Altium 当前 PCB，并可直接让 AI 执行只读/写命令。
+
+## 配置参考
+
+### 后端 `backend/.env`
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `DATABASE_URL` | `postgresql+asyncpg://postgres:postgres@localhost:5432/aidrive_altium` | SQLite 可写 `sqlite+aiosqlite:///./aidrive_altium.db` |
+| `SECRET_KEY` | `dev-secret-change-me-in-production` | JWT 签名密钥，生产必须替换 |
+| `ADMIN_EMAIL` | `admin@example.com` | 启动时若不存在则创建 |
+| `ADMIN_PASSWORD` | `admin123456` | 同上；生产必须替换 |
+| `ADMIN_BOOTSTRAP_RESET_PASSWORD` | `false` | 为 `true` 时每次启动重置管理员密码 |
+| `DATA_DIR` | `./data` | 上传文件与 SVG 渲染产物根目录（容器内 `/data`） |
+| `JWT_EXPIRE_DAYS` | `7` | Token 有效期 |
+| `GATEWAY_URL` | `http://localhost:3296` | 预留项，当前连接地址以数据库中的连接记录为准 |
+
+### 网关环境变量（Windows 机器）
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `ALTIUM_MODE` | `mock` | `mock` 内置演示数据；`live` 走文件乒乓桥 |
+| `ALTIUM_BRIDGE_DIR` | `%USERPROFILE%\Documents\AltiumBridge` | 与 DelphiScript 共享的请求/响应目录 |
+| `GATEWAY_PORT` | `3296` | 监听端口 |
+| `GATEWAY_HOST` | `0.0.0.0` | 监听地址 |
+| `GATEWAY_TOKEN` | 空 | 设置后除 `/health` 外都要求 `Authorization: Bearer <token>` |
+| `ALTIUM_OP_TIMEOUT` | `20` | 单次桥事务超时（秒） |
+
+### 前端
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `VITE_BASE_PATH` | `/` | 门户子路径部署时设为 `/altium/`，API 随之走 `/altium/api/v1` |
+
+## 核心机制
+
+### 1. 离线解析（ADR-002）
+
+- 上传后由 `parse_service` 落盘到 `DATA_DIR/uploads/<projectId>`，再以 `asyncio.to_thread` 启动独立 worker。
+- worker 协议：`argv[1] = job.json`（`jobId/projectDir/outDir/renderSvg/projectName`）→ `outDir/result.json`；产物含 `snapshot`、`svgManifest`、`design.json`。
+- 快照 schema：`aidrive.snapshot.v0`，字段包括 `project/documents/stats/components/nets/bom/pcbs/warnings`；网络带引脚级 `terminals`。
+- 兼容性：无 `PrjPcb` 时自动合成 `_synthesized.PrjPcb`；原理图编译/设计 JSON/BOM/PCB 各自 `try/except` 降级，失败写入 `warnings`。
+- PCB 渲染降级链：`PcbSvgRenderOptions(allow_text_geometry_fallback=True)` → `to_board_outline_svg()`（板框兜底）。
+- 也支持直接上传 `aidrive.snapshot.v0` JSON 作为快照，跳过解析（便于外部工具接入）。
+- 快照渲染 id 强制 ASCII（`sch_*` / `pcb_*`），与 `/svgs/{svgId}` 的 `[A-Za-z0-9_-]+` 校验对齐。
+
+### 2. AI 编排与技能
+
+- 系统提示词 = `BASE_PROMPT` + 助手人设 + 命中技能提示词 + 设计上下文（`orchestrator.compose_system_prompt`）。
+- 上下文双通道：关联工程时用离线快照摘要（元件前 25、网络前 30、BOM 前 12、单端网络提示）；未关联工程时自动取第一条 `connected` 网关的实时摘要。
+- 技能编排打分：`code` 命中 50、技能名 40、每个关键词 15、助手绑定 10；阈值 15，默认 Top-3。
+- 历史窗口 20 条消息；会话与消息入库，SSE 事件回显激活技能与工具调用。
+- SSE 事件：`meta`、`skills_activated`、`delta`、`tool_call`、`tool_result`、`tool_confirmation_required`、`error`、`done`。
+
+### 3. AI 工具调用与写操作确认
+
+1. 每轮对话通过 `sync_gateway_tools()` 从已连接 gateway 的 `/tools` 拉取清单，注册进 `ToolRegistry`（幂等）。
+2. 模型以 function calling 选择工具；只读工具直接执行并回喂结果，最多 5 轮。
+3. 写工具（`requires_confirmation=true`）由后端**先自动 dry-run**，产出预览并推送 `tool_confirmation_required`；本轮结果标记 `requiresConfirmation` 回喂模型。
+4. 前端渲染确认卡（工具名 + 预览 + 参数）：点「确认执行」调用 `POST /altium/connections/{id}/command`（`confirmed=true`），点取消则丢弃。
+5. 工具结果统一 `{"success": bool, ...}` 信封，异常不中断对话。
+
+> 当前写命令覆盖高亮网络/移动元件/旋转元件，**尚无命令级审计、撤销与事务回滚**（ADR-001 目标态），生产使用需谨慎。
+
+### 4. 实时连接（gateway + DelphiScript 桥）
+
+- 两种模式：`ALTIUM_MODE=mock`（默认，无 Altium 也能联调）与 `live`（文件乒乓）。
+- 桥协议 v1（行式文本，避免 DelphiScript 侧 JSON 解析）：请求 `OP|<op>|k=v...` + `END|<id>`；响应 `RES|<idx>|OK|ITEM|ERR|...` + `END|<id>`。
+- 传输使用**固定文件名** `requests/request.txt`、`responses/response.txt`，规避 DelphiScript 目录枚举问题；驱动内置 20s 超时与陈旧响应清理。
+- 截图：桥端受 DLL 声明限制无法 GDI 截图，gateway 回退为 PowerShell + `PrintWindow` 截取 Altium 主窗口；仍失败则返回占位 SVG。
+
+**命令清单（11 个：8 只读 + 3 写）**
+
+| 命令 | 类型 | 说明 |
+|---|---|---|
+| `altium_ping` | 只读 | 桥连通性（PONG） |
+| `altium_get_project_info` | 只读 | 当前工程名称/路径/活动文档 |
+| `altium_get_schematic_components` | 只读 | 当前原理图元件（位号/值/封装） |
+| `altium_get_schematic_nets` | 只读 | 当前原理图网络与连接计数 |
+| `altium_get_pcb_components` | 只读 | PCB 元件、层、坐标、旋转角 |
+| `altium_get_pcb_stats` | 只读 | 元件/焊盘/走线/过孔/网络/板框/层数 |
+| `altium_get_stackup` | 只读 | 板层名称列表 |
+| `altium_take_screenshot` | 只读 | 当前文档画面（live 下 BMP→PNG） |
+| `altium_highlight_net` | 写（需确认） | 高亮/取消高亮网络（仅视觉） |
+| `altium_move_component` | 写（需确认） | 按位号移动元件到坐标（mils） |
+| `altium_rotate_component` | 写（需确认） | 按位号旋转元件（0–360°） |
+
+**gateway REST**
+
+| 端点 | 说明 |
+|---|---|
+| `GET /health` | 状态、模式、桥目录、Altium 是否在线、命令数 |
+| `GET /tools` | 命令清单（含 `category` / `requiresConfirmation` / `paramsSchema`） |
+| `POST /command/{name}` | 执行命令；写命令需 `dry_run` 或 `confirmed` |
+| `GET /live/summary` | 聚合实时摘要（LLM 上下文用） |
+| `GET /screenshot` | 当前窗口截图（PNG，失败为占位 SVG） |
+| `GET /mcp` | **未挂载**；MCP 请用 stdio 入口或 `mcp_server --http` 单独启动 |
+
+**MCP 客户端接入（Claude Desktop / ZCode）**
 
 ```json
 {
@@ -102,47 +298,82 @@ docker compose up -d --build
 }
 ```
 
----
+## API 一览（后端 `/api/v1`）
 
-## 功能总览
+| 分组 | 端点 |
+|---|---|
+| 认证 | `POST /auth/register`、`POST /auth/login`、`GET /auth/me` |
+| 工程 | `GET/POST /files/projects`、`GET/DELETE /files/projects/{id}`、`POST /files/projects/{id}/reparse` |
+| 工程数据 | `GET /files/projects/{id}/components`、`/nets`、`/nets/{net}`、`/bom`、`/svgs`、`/svgs/{svgId}` |
+| 对话 | `POST /ai/chat/stream`（SSE）、`GET /ai/conversations`、`GET /ai/conversations/{id}/messages`、`DELETE /ai/conversations/{id}` |
+| 模型 | `GET/POST /ai/models`、`PUT/DELETE /ai/models/{id}` |
+| 技能 | `GET/POST /ai/skills`、`PUT/DELETE /ai/skills/{id}`、`POST /ai/skills/resolve` |
+| 助手 | `GET/POST /ai/assistants`、`PUT/DELETE /ai/assistants/{id}`、`POST /ai/assistants/{id}/default` |
+| 实时连接 | `GET/POST /altium/connections`、`POST /{id}/test`、`POST /{id}/command`、`GET /{id}/live/summary`、`GET /{id}/screenshot`、`GET /altium/connections/first-connected`、`DELETE /{id}` |
+| 健康检查 | `GET /health` |
 
-| 功能 | 状态 | 说明 |
-|---|---|---|
-| 用户认证 | ✅ | JWT 注册/登录，启动自动创建管理员 |
-| 工程文件离线解析 | ✅ | 上传 .PrjPcb/.SchDoc/.PcbDoc → 隔离 worker（altium-monkey）→ 元件/引脚级网络/BOM/PCB 统计/板框/叠层 |
-| 可视化查看 | ✅ | 原理图 SVG、PCB SVG、元件/网络（单端标记+引脚明细）/BOM 合并视图 |
-| AI 对话 | ✅ | 助手选择 + 技能编排、离线快照或实时摘要上下文注入、SSE 流式 |
-| AI 助手 | ✅ | 角色人设 + 系统提示词 + 推荐技能绑定 + 绑定模型；系统助手可编辑、可设默认 |
-| 技能库 | ✅ | 任务级提示词模板 CRUD，关键词自动匹配（`POST /ai/skills/resolve`），对话中候选条手动选用 |
-| 模型管理 | ✅ | mock / OpenAI 兼容（含 Ollama）/ Anthropic，默认模型切换 |
-| Altium 实时连接 | ✅ | 连接测试、实时面板（工程/统计/截图）、对话实时上下文；MCP server 供外部客户端 |
-| 规则引擎/RAG/选型 | 规划中 | 见路线图 |
+约定：响应统一 camelCase（`CamelModel`），请求同时接受 camelCase / snake_case；工程数据的分页端点返回 `{items, total}`；业务实体软删（`is_deleted`）。
 
-### AI 助手与技能（复刻 AIIgnitePLM 交互）
+## 测试
 
-- **助手（`/api/v1/ai/assistants`）**：`name` / `description` / `avatar`（16 个内置图标）/ `category` / `systemPrompt` / `skillCodes`（推荐技能）/ `modelConfigId` / `isDefault`；启动自动补种 4 个系统助手（通用硬件、原理图审查、PCB 审查、需求分析）。
-- **技能（`/api/v1/ai/skills`）**：`code` / `name` / `description` / `icon` / `promptTemplate` / `keywords` / `enabled`；启动补种 4 个系统技能（原理图审查、PCB 审查、需求分析、BOM 分析）。系统技能可改提示词但不可删、不可改 code。
-- **编排链路**：输入防抖 500ms → `POST /ai/skills/resolve`（关键词命中 15 分/个、技能名 40、code 50、助手绑定 10，阈值 15，Top-3）→ 候选条可手动增删 → 随 `skills: []` 提交 → 后端按助手人设 + 技能提示词 + 设计上下文组合 system prompt，并以 `skills_activated` 事件回显激活卡。
-- **界面**：对话工作台顶部助手选择器（搜索 + 默认徽标）、欢迎卡（建议提问 + 可用技能）、消息内激活卡（可展开匹配分与原因）、历史会话面板；「AI 助手」页提供助手卡片网格与技能库管理。
+```powershell
+# gateway：协议编解码、命令注册表、dry-run/确认、mock 驱动
+cd gateway
+.\.venv\Scripts\python.exe -m pytest -q      # 12 passed
+```
 
+- 前端检查：`cd frontend && npm run lint && npm run build`（`tsc -b` + Vite 构建）。
+- 后端暂无自动化测试；worker 协议与快照结构建议作为下一步 pytest 基线（见已知限制）。
 
-## 已知问题
+## 部署到服务器
 
-- 个别 Altium 文件（如 jlink_pcb.PcbDoc）存在嵌入字体损坏与非零板框原点，PCB SVG 视口异常；常规文件正常
-- DelphiScript 驻留脚本按公开 RTL API 编写，不同 Altium 版本可能需在真机微调（已逐字段 try/except 容错）
-- 解析依赖 altium-monkey（AGPL-3.0）：独立子进程隔离运行，见 [ADR-002](docs/design/adr/ADR-002-altium-monkey-offline-engine.md)
+```bash
+cp scripts/deploy.env.example scripts/deploy.env   # 填 HOST / USER / PATH
+bash scripts/deploy-remote.sh                      # rsync + 远程 compose 构建启动 + 健康检查
+```
+
+脚本会排除 `node_modules/.venv/data/backend/.env/gateway` 等目录，首次部署自动生成远程 `backend/.env`（随机 `SECRET_KEY`）。
+
+## 已知限制与待办
+
+| # | 问题 | 影响 | 建议 |
+|---|---|---|---|
+| 1 | `start.sh` 使用 3345/3340，而 `vite.config.ts` 为端口 3290、代理到 3295 | `bash start.sh` 的前端会开在 3290 且代理不到 3345 后端 | 统一两端端口（推荐把 vite 改回 3340/3345，或用环境变量覆盖） |
+| 2 | 无 Alembic 迁移（启动 `create_all` + PG 补列） | 改表需手写 DDL，SQLite 无法执行补列语句 | M0 收尾引入 alembic 基线 |
+| 3 | AI API Key 明文存储，且 `GET /ai/models` 原样回显 | 密钥泄露风险 | Fernet 加密落库 + 列表脱敏 |
+| 4 | 写命令无审计、撤销、事务回滚、幂等键 | 不满足 ADR-001 生产要求 | 命令审计表 + 快照/撤销 + 请求 ID |
+| 5 | 网关 `/mcp` 未挂载（仅文档字符串提及） | 无法用 REST 端口连 MCP | 在 `app.py` 挂载 FastMCP ASGI，或只用 stdio |
+| 6 | `GET /api/v1/health` 的 `gatewayEnabled` 恒为 `false` | 该字段不代表实时状态 | 改查 `alt_connections` 或删除该字段 |
+| 7 | `design_context` 中板框尺寸除以 1000 却仍标注 mil | AI 上下文里的板框数值偏小 | 与快照/前端口径统一（快照已是 mils） |
+| 8 | 个别 PcbDoc（如 jlink_pcb）嵌入字体损坏、板框原点非零 | PCB SVG 视口异常 | worker 增加 viewBox/包围盒归一化；向 altium-monkey 反馈 |
+| 9 | 仓库根目录遗留约百个调试脚本/截图（`*.ps1`、`*.png`、`alivetest.ps1` 等） | 仓库噪音、误提交风险 | 归档到 `scripts/debug/` 或删除后补 `.gitignore` |
+| 10 | 后端无测试、SSE 无心跳/断线重连、PCB 预览无缩放/层开关 | 回归与体验 | pytest + 心跳 + 画布控件 |
+| 11 | DelphiScript 脚本按公开 RTL API 编写 | 不同 Altium 版本可能需要真机微调 | 已有逐字段 try/except；按版本做兼容矩阵 |
+
+## 安全与合规
+
+- **认证**：JWT Bearer；密码 bcrypt；除注册/登录外所有业务端点要求登录。
+- **网关**：可设 `GATEWAY_TOKEN`，后端连接记录保存同一令牌；网关 CORS 全开、无 TLS，**仅限受信局域网**使用。
+- **写操作**：必须 dry-run 后人工确认；但当前无审计与撤销，请勿在生产设计上直接放开。
+- **默认口令**：`admin123456`、`SECRET_KEY` 仅用于开发，部署前必须替换。
+- **AGPL-3.0**：离线解析依赖 `altium-monkey`。按其许可证要求，运行在独立 worker 子进程（聚合而非链接），本仓库不复制其源码、不在后端进程内 import；对外分发/对外服务前需重新评估授权。
+
+## 路线图
+
+- ✅ 第一阶段：平台前后端 + Altium 文件离线读取/查看
+- ✅ 第二阶段：实时连接（gateway + DelphiScript 桥 + MCP server + 平台接入）
+- ✅ 工具链首版：gateway 工具动态注册、function calling、dry-run + 人工确认（3 个写命令）
+- 第三步：规则引擎（ERC/DRC/DFM）+ AI 审查报告 + RAG 知识库（pgvector）
+- 第四步：元件选型 / BOM 风险 / 替代料
+- 第五步：完整意图命令层（ADR-001）——命令审计、事务与撤销、更多原语/意图命令、端到端评测
 
 ## 设计文档
 
 - [大模型最大程度辅助设计分析](docs/design/llm-max-assist-analysis.md)
 - [ADR-001 语义描述到设计输出的执行路径](docs/design/adr/ADR-001-semantic-to-design-execution.md)
-- [ADR-002 altium-monkey 离线引擎](docs/design/adr/ADR-002-altium-monkey-offline-engine.md)
+- [ADR-002 altium-monkey 离线引擎（含 AGPL 策略）](docs/design/adr/ADR-002-altium-monkey-offline-engine.md)
 - [模块开发规范](docs/design/module-conventions.md)
 - [第一阶段完成度审计](docs/design/phase1-completion-audit.md)
-
-## 路线图
-
-- ✅ 第一阶段：平台前后端 + Altium 文件离线读取查看
-- ✅ 第二阶段：Altium 实时连接（gateway + DelphiScript 桥 + MCP server + 平台接入）
-- 第三步：规则引擎（ERC/DRC/DFM）+ AI 审查报告 + RAG 知识库
-- 第四步：元件选型/BOM 风险；第五步：写命令（意图命令层 + dry-run 确认 + 审计）
+- [网关部署与协议细节](gateway/README.md)
+- [前端开发说明](frontend/README.md)
+- [工程约定速览](CLAUDE.md)
