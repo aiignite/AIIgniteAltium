@@ -25,6 +25,9 @@ class SkillIn(CamelModel):
     icon: str = "sparkles"
     prompt_template: str = ""
     keywords: list[str] = []
+    tool_codes: list[str] = []
+    priority: int = Field(default=50, ge=0, le=100)
+    extra_config: dict = {}
     enabled: bool = True
 
 
@@ -61,6 +64,9 @@ def _out(s: AISkill) -> SkillOut:
         icon=s.icon,
         prompt_template=s.prompt_template,
         keywords=list(s.keywords or []),
+        tool_codes=list(s.tool_codes or []),
+        priority=s.priority,
+        extra_config=dict(s.extra_config or {}),
         enabled=s.enabled,
         is_system=s.is_system,
         sort_order=s.sort_order,
@@ -143,6 +149,45 @@ async def update_skill(
     return _out(skill)
 
 
+@router.post("/{skill_id}/duplicate", response_model=SkillOut)
+async def duplicate_skill(
+    skill_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    _user=Depends(get_current_user),
+) -> SkillOut:
+    skill = await db.get(AISkill, skill_id)
+    if skill is None or skill.is_deleted:
+        raise HTTPException(status_code=404, detail="技能不存在")
+    base_code = f"{skill.code}-copy"
+    code = base_code
+    index = 2
+    while (
+        await db.execute(select(AISkill).where(AISkill.code == code, AISkill.is_deleted.is_(False)))
+    ).scalars().first() is not None:
+        code = f"{base_code}-{index}"
+        index += 1
+
+    copy = AISkill(
+        code=code,
+        name=f"{skill.name}（副本）",
+        description=skill.description,
+        category=skill.category,
+        icon=skill.icon,
+        prompt_template=skill.prompt_template,
+        keywords=list(skill.keywords or []),
+        tool_codes=list(skill.tool_codes or []),
+        priority=skill.priority,
+        extra_config=dict(skill.extra_config or {}),
+        is_system=False,
+        enabled=skill.enabled,
+        sort_order=skill.sort_order + 1,
+    )
+    db.add(copy)
+    await db.commit()
+    await db.refresh(copy)
+    return _out(copy)
+
+
 @router.delete("/{skill_id}")
 async def delete_skill(
     skill_id: UUID,
@@ -165,7 +210,10 @@ async def resolve_skills(
     db: AsyncSession = Depends(get_db),
     _user=Depends(get_current_user),
 ) -> list[SkillCandidateOut]:
-    """轻量技能编排：按关键词命中打分，返回 top-K 候选（对齐 AIIgnitePLM /ai/skills/resolve）。"""
+    """轻量技能编排：关键词命中 + 助手绑定 + 优先级加权，返回 top-K 候选。
+
+    打分：code 命中 50 / name 命中 40 / 每个 keyword 命中 15 / 助手绑定 10 / 优先级 0-10。
+    """
     query = body.query.lower()
     if not query.strip():
         return []
@@ -180,20 +228,31 @@ async def resolve_skills(
         if skill.code in body.exclude_codes:
             continue
         score = 0
-        reasons: list[str] = []
+        head: list[str] = []
+        keyword_hits: list[str] = []
         if skill.code.lower() in query:
             score += 50
-            reasons.append(f"code:{skill.code}")
+            head.append(f"code:{skill.code}")
         if skill.name and skill.name.lower() in query:
             score += 40
-            reasons.append(f"keyword:{skill.name}")
+            head.append(f"keyword:{skill.name}")
         for kw in skill.keywords or []:
             if kw and kw.lower() in query:
                 score += 15
-                reasons.append(f"keyword:{kw}")
+                keyword_hits.append(f"keyword:{kw}")
+        # 负向关键词（extra_config.negative_keywords）：避免近义技能互相误命中
+        extra = skill.extra_config if isinstance(skill.extra_config, dict) else {}
+        for nkw in extra.get("negative_keywords") or []:
+            if nkw and str(nkw).lower() in query:
+                score -= 40
+        if score > 0:
+            bonus = max(0, min(100, int(skill.priority or 0))) // 10
+            if bonus:
+                score += bonus
+                head.append(f"priority:{bonus}")
         if skill.code in bound_codes:
             score += 10
-            reasons.append("assistant")
+            head.append("assistant")
         if score >= MIN_SCORE:
             candidates.append(
                 SkillCandidateOut(
@@ -202,7 +261,8 @@ async def resolve_skills(
                     description=skill.description,
                     icon=skill.icon,
                     score=min(score, 100),
-                    reasons=reasons[:4],
+                    # 先给"为什么命中"的主因（code/name/优先级/助手绑定），再补关键词细节
+                    reasons=[*head, *keyword_hits][:5],
                 )
             )
     candidates.sort(key=lambda c: c.score, reverse=True)

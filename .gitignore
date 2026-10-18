@@ -11,3 +11,26 @@ backend/data/
 .zcode/
 .venv-gw/
 scripts/deploy.env
+
+# 截图归档目录：截图属调试产物不入库，仅保留说明
+screenshots/*
+!screenshots/README.md
+
+# AI 平台冒烟测试的临时 SQLite（test/smoke_ai_platform.py，异常退出时可能残留）
+_smoke_ai.db
+_smoke_ai.db-wal
+_smoke_ai.db-shm
+
+# 参考实现浅克隆（比对用，不入库）
+.tmp-ref/
+
+# 本地调试产物（不入库）
+ui_dump.txt
+backend/aidrive_altium.db
+backend/aidrive_altium.db-*
+.trae/
+gateway/altium_scripts/*.bak
+gateway/altium_scripts/History/
+gateway/altium_scripts/__Previews/
+gateway/live_verify_write.py
+gateway/.pytest_cache/

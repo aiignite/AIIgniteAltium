@@ -19,10 +19,13 @@ import {
   IconSparkles,
   IconX,
 } from '@tabler/icons-react'
+import { useNavigate } from 'react-router-dom'
 import { api, streamChat, type ActivatedSkill, type ChatStreamEvent } from '../api/client'
 import { DesignDataTabs } from '../components/DesignDataTabs'
 import { AssistantPicker, type AssistantItem } from '../components/ai/AssistantPicker'
 import { AssistantAvatar } from '../components/ai/AssistantAvatar'
+import { ModelPicker } from '../components/ai/ModelPicker'
+import type { AIModelItem } from '../components/ai/types'
 import { SkillActivationCard } from '../components/ai/SkillActivationCard'
 
 export interface ProjectSummary {
@@ -42,8 +45,13 @@ interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
   error?: boolean
+  /** 错误分类（no_model 时展示"去配置模型"入口） */
+  code?: string
   skills?: ActivatedSkill[]
   assistantName?: string
+  /** 本条回答实际使用的模型（meta 事件下发） */
+  modelName?: string
+  provider?: string
   /** 工具调用日志（tool_call / tool_result） */
   toolLog?: ToolLogEntry[]
   /** 待确认的写操作（tool_confirmation_required） */
@@ -96,12 +104,6 @@ interface ConversationItem {
   updatedAt: string
 }
 
-interface AIModelItem {
-  id: string
-  name: string
-  enabled: boolean
-}
-
 function timeAgo(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime()
   const m = Math.floor(diff / 60000)
@@ -132,6 +134,7 @@ function isToolOk(r: unknown): boolean {
 }
 
 export function WorkbenchPage() {
+  const navigate = useNavigate()
   const [projects, setProjects] = useState<ProjectSummary[]>([])
   const [projectId, setProjectId] = useState<string | null>(null)
   const [assistants, setAssistants] = useState<AssistantItem[]>([])
@@ -299,6 +302,13 @@ export function WorkbenchPage() {
         if (event.type === 'meta' && event.conversationId) {
           setConversationId(event.conversationId)
           loadConversations()
+          setMessages((prev) => {
+            const next = [...prev]
+            const last = next[next.length - 1]
+            if (!last) return prev
+            next[next.length - 1] = { ...last, modelName: event.modelName, provider: event.provider }
+            return next
+          })
         }
         if (event.type === 'skills_activated' && event.skills) {
           const activated = event.skills
@@ -362,7 +372,12 @@ export function WorkbenchPage() {
         if (event.type === 'error')
           setMessages((prev) => {
             const next = [...prev]
-            next[next.length - 1] = { ...next[next.length - 1], content: event.message ?? '出错了', error: true }
+            next[next.length - 1] = {
+              ...next[next.length - 1],
+              content: event.message ?? '出错了',
+              error: true,
+              code: event.code,
+            }
             return next
           })
         if (event.type === 'done') setStreaming(false)
@@ -489,13 +504,12 @@ export function WorkbenchPage() {
               allowDeselect
               clearable
             />
-            <Select
-              size="xs"
-              w={130}
-              placeholder="模型"
-              data={models.map((m) => ({ value: m.id, label: m.name }))}
+            <ModelPicker
+              models={models}
               value={modelId}
               onChange={setModelId}
+              width={150}
+              placeholder="默认模型"
             />
           </Group>
 
@@ -633,12 +647,28 @@ export function WorkbenchPage() {
                 ) : (
                   <Box key={i} mb="sm">
                     {(m.skills?.length ?? 0) > 0 && <SkillActivationCard skills={m.skills!} />}
+                    {m.modelName && (
+                      <Text size="9px" c="dimmed" mb={2} ml={4}>
+                        {m.provider} · {m.modelName}
+                      </Text>
+                    )}
                     <Box
                       className="ai-bubble ai-bubble-assistant"
                       style={m.error ? { border: '1px solid #fca5a5', background: '#fef2f2', color: '#b91c1c' } : undefined}
                     >
                       {m.content || (streaming && i === messages.length - 1 && !m.confirmation ? '思考中…' : '')}
                     </Box>
+                    {m.code === 'no_model' && (
+                      <Button
+                        mt={6}
+                        size="compact-xs"
+                        variant="light"
+                        color="orange"
+                        onClick={() => navigate('/ai-config?tab=models')}
+                      >
+                        去配置模型
+                      </Button>
+                    )}
                     {(m.toolLog?.length ?? 0) > 0 && (
                       <Box mt={4} style={{ fontSize: 11 }}>
                         {m.toolLog!.map((t, ti) => (

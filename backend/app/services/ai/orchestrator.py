@@ -1,4 +1,7 @@
-"""编排器：助手人设 + 技能提示词 + 设计上下文 + 历史 → provider 流式输出。"""
+"""编排器：助手人设 + 技能提示词 + 设计上下文 + 历史 → provider 流式输出。
+
+模型解析统一走 ``services/ai/llm_router.resolve``（请求 → 会话 → 助手 → 默认 → 兜底）。
+"""
 
 import json
 import logging
@@ -10,24 +13,30 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session_maker
-from app.models.ai.ai_model import AIModelConfig
 from app.models.ai.assistant import AIAssistant, AISkill
 from app.models.ai.conversation import Conversation, Message
 from app.models.files.uploaded_project import UploadedProject
 from app.services.ai import providers
 from app.services.ai.design_context import build_design_context
+from app.services.ai.llm_router import NoAvailableModelError, ProviderResolution, resolve
 from app.services.ai.skill_registry import BASE_PROMPT
 
 logger = logging.getLogger(__name__)
 
 MAX_HISTORY_MESSAGES = 20
+MAX_TOOL_ROUNDS = 5
+
+_ERROR_CODES = {
+    "401": "auth",
+    "403": "auth",
+    "429": "rate",
+    "stream_options": "usage",
+}
 
 
 async def _try_live_context() -> str:
     """无离线工程时，尝试从已连接 gateway 取实时设计摘要（失败静默）。"""
     try:
-        from sqlalchemy import select
-
         from app.models.altium.connection import GatewayConnection
         from app.services.ai.design_context import live_summary_to_context
 
@@ -50,30 +59,12 @@ async def _try_live_context() -> str:
         return ""
 
 
-async def resolve_model_config(
-    db: AsyncSession, model_config_id: UUID | None, assistant: AIAssistant | None = None
-) -> AIModelConfig:
-    for candidate_id in (model_config_id, assistant.model_config_id if assistant else None):
-        if candidate_id is not None:
-            cfg = await db.get(AIModelConfig, candidate_id)
-            if cfg is not None and not cfg.is_deleted and cfg.enabled:
-                return cfg
-    result = await db.execute(
-        select(AIModelConfig).where(
-            AIModelConfig.is_default.is_(True),
-            AIModelConfig.is_deleted.is_(False),
-            AIModelConfig.enabled.is_(True),
-        )
-    )
-    cfg = result.scalars().first()
-    if cfg is None:
-        result = await db.execute(
-            select(AIModelConfig).where(AIModelConfig.is_deleted.is_(False)).limit(1)
-        )
-        cfg = result.scalars().first()
-    if cfg is None:
-        raise RuntimeError("未配置任何 AI 模型，请先在设置页添加")
-    return cfg
+def _error_code(exc: Exception) -> str:
+    text = str(exc)
+    for needle, code in _ERROR_CODES.items():
+        if needle in text:
+            return code
+    return "provider"
 
 
 async def resolve_assistant(db: AsyncSession, assistant_id: UUID | None) -> AIAssistant | None:
@@ -168,6 +159,43 @@ async def build_messages(
     return messages, system
 
 
+def _skill_tool_allowlist(assistant: AIAssistant | None, skills: list) -> set[str] | None:
+    """助手 + 技能的可用工具并集；为空表示不限制。"""
+    allowed: set[str] = set(assistant.tool_codes or []) if assistant is not None else set()
+    for skill in skills:
+        codes = skill.tool_codes if hasattr(skill, "tool_codes") else skill.get("tool_codes") or []
+        allowed.update(c for c in (codes or []) if c)
+    return allowed or None
+
+
+async def _build_tools(
+    assistant: AIAssistant | None, skills: list, resolution: ProviderResolution
+) -> list[dict]:
+    if not resolution.supports_tools:
+        logger.info("model %s 不支持 tools，跳过工具装配", resolution.model_name)
+        return []
+    try:
+        from app.ai_tools import sync_gateway_tools, tool_definitions
+
+        await sync_gateway_tools()
+        defs = tool_definitions()
+    except Exception as exc:  # noqa: BLE001 —— 工具装配失败不影响普通对话
+        logger.info("tool setup skipped: %s", exc)
+        return []
+
+    allowlist = _skill_tool_allowlist(assistant, skills)
+    if allowlist is not None:
+        defs = [d for d in defs if d["function"]["name"] in allowlist]
+    return defs
+
+
+def _assistant_meta(assistant: AIAssistant | None) -> dict:
+    return {
+        "assistantId": str(assistant.id) if assistant else None,
+        "assistantName": assistant.name if assistant else "通用助手",
+    }
+
+
 async def stream_reply(
     db: AsyncSession,
     *,
@@ -180,7 +208,7 @@ async def stream_reply(
     assistant_id: UUID | None = None,
     model_config_id: UUID | None = None,
 ) -> AsyncGenerator[dict, None]:
-    """产出事件流：meta / skills_activated / delta / error / done（同时负责消息持久化）。"""
+    """产出事件流：meta / skills_activated / delta / tool_* / error / done（同时负责消息持久化）。"""
     started = time.time()
     try:
         assistant = await resolve_assistant(db, assistant_id)
@@ -189,9 +217,11 @@ async def stream_reply(
         skill_codes = list(dict.fromkeys(skill_codes))
         loaded_skills = await load_skills(db, skill_codes)
         skill_payload = [
-            {"code": (s.code if hasattr(s, "code") else s["code"]),
-             "name": (s.name if hasattr(s, "name") else s["name"]),
-             "description": (s.description if hasattr(s, "description") else s.get("description", ""))}
+            {
+                "code": (s.code if hasattr(s, "code") else s["code"]),
+                "name": (s.name if hasattr(s, "name") else s["name"]),
+                "description": (s.description if hasattr(s, "description") else s.get("description", "")),
+            }
             for s in loaded_skills
         ]
 
@@ -219,11 +249,15 @@ async def stream_reply(
         if model_config_id is not None:
             conversation.model_config_id = model_config_id
 
-        cfg = await resolve_model_config(
+        resolution = await resolve(
             db,
-            model_config_id if model_config_id is not None else conversation.model_config_id,
-            assistant,
+            model_config_id=model_config_id if model_config_id is not None else conversation.model_config_id,
+            conversation=conversation,
+            assistant=assistant,
         )
+        if conversation.model_config_id is None:
+            conversation.model_config_id = UUID(resolution.config_id)
+
         user_message = Message(
             conversation_id=conversation.id,
             seq=conversation.message_count + 1,
@@ -241,6 +275,7 @@ async def stream_reply(
             "title": conversation.title,
             "assistantId": str(assistant.id) if assistant else None,
             "assistantName": assistant.name if assistant else "通用助手",
+            **resolution.summary(),
         }
         if skill_payload:
             yield {"type": "skills_activated", "skills": skill_payload}
@@ -259,45 +294,43 @@ async def stream_reply(
             role="assistant",
             content="",
             skill=conversation.skill,
-            model_config_id=cfg.id,
-            provider=cfg.provider,
+            model_config_id=UUID(resolution.config_id),
+            provider=resolution.provider,
             meta={
                 "skills": skill_payload,
-                "assistantId": str(assistant.id) if assistant else None,
-                "assistantName": assistant.name if assistant else "通用助手",
+                **_assistant_meta(assistant),
+                "model": resolution.summary(),
             },
         )
         db.add(assistant_message)
         conversation.message_count += 1
         await db.flush()
 
+        tool_defs = await _build_tools(assistant, loaded_skills, resolution)
+
         accumulated: list[str] = []
         tool_messages: list[dict] = []
-        tool_defs: list[dict] = []
-        try:
-            from app.ai_tools import sync_gateway_tools, tool_definitions
-
-            await sync_gateway_tools()
-            tool_defs = tool_definitions()
-        except Exception as exc:  # noqa: BLE001 —— 工具装配失败不影响普通对话
-            logger.info("tool setup skipped: %s", exc)
-
-        MAX_TOOL_ROUNDS = 5
+        usage: dict | None = None
         for _round in range(MAX_TOOL_ROUNDS):
             pending_calls: list[dict] | None = None
             round_text: list[str] = []
             async for event in providers.stream_chat(
-                cfg.provider,
-                base_url=cfg.base_url or default_base_url(cfg.provider),
-                api_key=cfg.api_key,
-                model=cfg.model_name or "default",
+                resolution.provider,
+                base_url=resolution.base_url or providers.default_base_url(resolution.provider),
+                api_key=resolution.api_key,
+                model=resolution.model_name or "default",
                 messages=messages + tool_messages,
                 tools=tool_defs or None,
+                temperature=resolution.temperature,
+                max_tokens=resolution.max_tokens,
+                top_p=resolution.top_p,
             ):
                 if event["type"] == "delta":
                     round_text.append(event["text"])
                     accumulated.append(event["text"])
                     yield {"type": "delta", "text": event["text"]}
+                elif event["type"] == "usage":
+                    usage = event
                 elif event["type"] == "tool_calls":
                     pending_calls = event["calls"]
             if not pending_calls:
@@ -357,20 +390,30 @@ async def stream_reply(
         full_text = "".join(accumulated)
         assistant_message.content = full_text
         assistant_message.duration_ms = int((time.time() - started) * 1000)
+        if usage:
+            assistant_message.prompt_tokens = int(usage.get("promptTokens") or 0)
+            assistant_message.completion_tokens = int(usage.get("completionTokens") or 0)
+            assistant_message.meta = {**(assistant_message.meta or {}), "usage": usage}
         if assistant is not None:
             assistant.usage_count += 1
         await db.commit()
-        yield {"type": "done", "messageId": str(assistant_message.id), "durationMs": assistant_message.duration_ms}
+        yield {
+            "type": "done",
+            "messageId": str(assistant_message.id),
+            "durationMs": assistant_message.duration_ms,
+            "usage": usage or None,
+        }
+    except NoAvailableModelError as exc:
+        await db.rollback()
+        yield {"type": "error", "code": "no_model", "message": str(exc)}
+        yield {"type": "done"}
     except Exception as exc:  # noqa: BLE001 —— 流式通道内兜底，错误回传前端
         logger.exception("chat stream failed")
         await db.rollback()
-        yield {"type": "error", "message": str(exc)}
+        yield {"type": "error", "code": _error_code(exc), "message": str(exc)}
         yield {"type": "done"}
 
 
 def default_base_url(provider: str) -> str:
-    if provider == "anthropic":
-        return "https://api.anthropic.com"
-    if provider == "openai":
-        return "https://api.openai.com/v1"
-    return ""
+    """兼容旧引用：转发到 provider 注册表。"""
+    return providers.default_base_url(provider)

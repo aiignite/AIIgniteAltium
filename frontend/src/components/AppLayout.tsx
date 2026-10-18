@@ -12,7 +12,7 @@ import { useAuth } from '../contexts/AuthContext'
 
 const NAV = [
   { to: '/', label: '对话工作台', icon: IconCpu },
-  { to: '/assistants', label: 'AI 助手', icon: IconBrain },
+  { to: '/ai-config', label: 'AI 配置', icon: IconBrain },
   { to: '/projects', label: '工程文件', icon: IconFolder },
   { to: '/connections', label: 'Altium 连接', icon: IconPlugConnected },
   { to: '/settings', label: '设置', icon: IconSettings },

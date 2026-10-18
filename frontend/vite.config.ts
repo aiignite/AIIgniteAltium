@@ -10,11 +10,11 @@ export default defineConfig(({ mode }) => {
   return {
     base,
     server: {
-      port: 3290,
+      port: 3340,
       host: '0.0.0.0',
       proxy: {
         [apiPrefix]: {
-          target: 'http://127.0.0.1:3295',
+          target: 'http://127.0.0.1:3345',
           changeOrigin: true,
           timeout: 600_000,
           rewrite: (p) =>

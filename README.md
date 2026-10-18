@@ -4,7 +4,7 @@
 
 - **生产环境**：<https://www.aiignite.com.cn>（门户 → AIDriveAltium 卡片「启动」，或直达 [/altium/](https://www.aiignite.com.cn/altium/)）
 - **当前进度**：第一阶段（平台前后端 + Altium 文件离线读取/查看）与第二阶段（实时连接 + AI 工具链首版）均已完成，详见[路线图](#路线图)。
-- **本地入口**：前端 `http://localhost:3290`（dev）/ `http://localhost:3340`（容器），后端 `http://localhost:3295/docs`（dev）/ `http://localhost:3345`（容器）。
+- **本地入口**：前端 `http://localhost:3340`（dev 与容器一致），后端 `http://localhost:3345/docs`（dev 与容器一致）。
 
 ```
 ┌──────────────────────┐   REST / SSE    ┌───────────────────────┐   REST   ┌────────────────────────┐
@@ -28,9 +28,10 @@
 | 工程文件离线解析 | ✅ | 上传 `.PrjPcb/.SchDoc/.PcbDoc/.SchLib/.PcbLib`（也接受 `aidrive.snapshot.v0` JSON），隔离子进程解析为归一化快照 |
 | 可视化查看 | ✅ | 原理图 SVG、PCB SVG、元件/网络/BOM 表格（搜索、分页、排序、单端网络标记、引脚明细） |
 | AI 对话 | ✅ | 助手人设 + 技能提示词 + 设计上下文 + SSE 流式；对话历史持久化 |
-| AI 助手 | ✅ | 角色描述、系统提示词、推荐技能、绑定模型；系统助手可编辑、可设默认、不可删 |
-| 技能库 | ✅ | 任务级提示词模板 CRUD + 关键词打分编排（`POST /ai/skills/resolve`） |
-| 模型管理 | ✅ | `mock` / OpenAI 兼容（含 Ollama）/ Anthropic，默认模型切换 |
+| AI 配置中心 | ✅ | 独立页 `/ai-config`（模型 / 助手 / 技能三 Tab）；搜索筛选、卡片/列表双视图、连接测试、设默认、复制、导出 |
+| 大模型配置 | ✅ | 5 类 provider（`mock` / OpenAI 兼容 / Ollama 原生 `/api/chat` / llama.cpp / Anthropic），采样参数（temperature/top_p/max_tokens）与能力开关（工具/图像）、一键预设模板；密钥加密落库、列表仅显示掩码；写操作默认限管理员 |
+| AI 助手 | ✅ | 角色人设、系统提示词、开场白、推荐技能、工具子集、模型绑定与采样覆盖；支持复制与「预览系统提示词」；系统助手不可删 |
+| 技能库 | ✅ | 任务级提示词模板 CRUD + 关键词打分编排（`POST /ai/skills/resolve`，含优先级加权与负向关键词）；可关联工具子集 |
 | AI 工具调用 | ✅ | 拉取 gateway 工具清单动态注册，最多 5 轮工具循环；写操作必须先预览、再人工确认 |
 | Altium 实时连接 | ✅ | 连接 CRUD/测试、实时摘要、实时截图、工作台右侧实时 PCB 面板 |
 | 写命令（首版） | ✅ | 高亮网络 / 移动元件 / 旋转元件：`dry_run` 预览 → `confirmed` 执行 |
@@ -43,18 +44,18 @@
 
 | 组件 | 本地开发 | 容器 / 生产 | 说明 |
 |---|---|---|---|
-| 前端（Vite / nginx） | **3290** | **3340** → 容器 `80` | 门户子路径 `/altium/`；`vite.config.ts` 固定 dev 端口 3290 |
-| 后端（FastAPI） | **3295** | **3345** → 容器 `3295` | 业务前缀 `/api/v1`，文档 `/docs` |
+| 前端（Vite / nginx） | **3340** | **3340** → 容器 `80` | 门户子路径 `/altium/`；`vite.config.ts` 固定 dev 端口 3340 |
+| 后端（FastAPI） | **3345** | **3345** → 容器 `3345` | 业务前缀 `/api/v1`，文档 `/docs` |
 | altium-gateway | **3296** | — | 部署在装有 Altium 的 Windows 机器 |
 | PostgreSQL | `5432` | `5433` → `5432` | Docker 用 `pgvector/pgvector:pg16` |
 | Redis | — | `6380` → `6379` | 依赖已编排，业务代码暂未使用 |
 | SQLite | `backend/aidrive_altium.db` | — | 仓库内 `backend/.env` 当前使用，免数据库快速体验 |
 
-> **端口口径**：开发态（`npm run dev` + `uvicorn`）是 3290/3295，容器/生产是 3340/3345，二者通过 compose 端口映射与 nginx 反代对应。`start.sh` 目前按 3345/3340 启动，与 `vite.config.ts` 的 3290/3295 不一致，见[已知限制](#已知限制与待办)。
+> **端口口径**：自 2026-10-18 起开发态、容器、生产**统一为 3340/3345**，不再区分 dev 与生产端口（`vite.config.ts`、`backend/Dockerfile`、`frontend/nginx.conf`、`docker-compose.yml` 保持一致）。`docs/design/phase1-completion-audit.md` 中的 3290/3295 为当时的审计记录，保留为历史事实。
 
 ### 分层职责
 
-- **前端**：React 19 + Mantine 9，单页应用（工作台、AI 助手、工程文件、Altium 连接、设置）。
+- **前端**：React 19 + Mantine 9，单页应用（对话工作台、AI 配置、工程文件、Altium 连接、设置）。
 - **后端**：模块化单体，按功能域分组（`system / ai / files / altium`），统一 `/api/v1` 前缀；AI 编排、文件解析调度、连接代理都在这一层。
 - **解析 worker**：独立子进程，只 import `altium_monkey`，与后端通过 `job.json → result.json` 交换（AGPL 隔离，见 [ADR-002](docs/design/adr/ADR-002-altium-monkey-offline-engine.md)）。
 - **gateway**：命令层（语义命令 → 桥 ops）+ 驱动层（mock / 文件乒乓）+ REST + MCP，部署在 Altium 机器上。
@@ -82,20 +83,26 @@ AIDriveAltium/
 │  │  ├─ routers/{system,ai,files,altium}/
 │  │  ├─ services/{ai,files,altium}/
 │  │  │  ├─ ai/orchestrator.py   # 提示词组装、工具循环、SSE 事件
-│  │  │  ├─ ai/providers.py      # mock / OpenAI 兼容 / Anthropic 流式
+│  │  │  ├─ ai/providers/        # provider 包：base / openai_compat / ollama(原生 /api/chat) / llamacpp / anthropic / mock / factory
+│  │  │  ├─ ai/llm_router.py     # 模型解析：请求 → 会话 → 助手 → 默认 → 兜底
+│  │  │  ├─ ai/secret_crypto.py  # API Key Fernet 加密（enc:v1:）+ 掩码
+│  │  │  ├─ ai/model_probe.py    # 连接测试与错误归类（含私网地址防护）
+│  │  │  ├─ ai/seed_data.py      # 技能 / 助手 / 模型模板幂等补种
 │  │  │  ├─ ai/design_context.py # 快照/实时摘要 → 上下文文本
 │  │  │  ├─ files/parse_service.py
 │  │  │  └─ altium/gateway_client.py
 │  │  ├─ ai_tools/__init__.py    # ToolRegistry + gateway 工具同步
 │  │  ├─ worker/altium_files_worker.py
 │  │  ├─ models/{system,ai,altium,files}/
-│  │  └─ database_patches.py     # 过渡期幂等补列（PG）
+│  │  └─ database_patches.py     # 过渡期幂等补列（PG，含 AI_PLATFORM_STATEMENTS）
+│  ├─ scripts/migrate_ai_platform.py  # AI 平台迁移独立重放入口（幂等，可反复执行）
 │  ├─ requirements.txt
-│  ├─ Dockerfile                 # 容器内监听 3295
+│  ├─ Dockerfile                 # 容器内监听 3345
 │  └─ .env.example
 ├─ frontend/
-│  ├─ src/pages/                 # Workbench / Projects / ProjectDetail / Assistants / Connections / Settings / Login
-│  ├─ src/components/            # AppLayout、DesignDataTabs、ai/*
+│  ├─ src/pages/                 # Workbench / Projects / ProjectDetail / AIConfigPage / Connections / Settings / Login
+│  ├─ src/pages/ai/              # ModelsPanel / AssistantsPanel / SkillsPanel
+│  ├─ src/components/            # AppLayout、DesignDataTabs、ai/*（ModelPicker、ToolChipSelect…）
 │  ├─ src/api/client.ts          # REST + SSE 客户端
 │  ├─ nginx.conf                 # 子路径与 API 反代、SSE 关闭缓冲
 │  ├─ vite.config.ts
@@ -113,6 +120,8 @@ AIDriveAltium/
 │  └─ README.md
 ├─ docs/design/                  # 设计分析、ADR、模块规范、阶段审计
 ├─ scripts/                      # deploy-remote.sh、deploy.env.example
+├─ screenshots/                  # 调试/联调截图统一归档（内容不入库，仅保留 README）
+├─ test/                         # 手动联调/排障脚本（非自动化测试，清单见 test/README.md）
 ├─ docker-compose.yml
 ├─ start.sh                      # macOS/Linux 一键启动（bash）
 └─ CLAUDE.md                     # 工程约定速览
@@ -151,15 +160,15 @@ docker compose up -d postgres redis
 python3 -m venv .venv
 .venv/bin/python -m pip install -r backend/requirements.txt
 cp backend/.env.example backend/.env      # 修改 DATABASE_URL
-cd backend && ../.venv/bin/python -m uvicorn app.main:app --port 3295 --reload
+cd backend && ../.venv/bin/python -m uvicorn app.main:app --port 3345 --reload
 
 # 3) 前端（新终端）
 cd frontend
 npm install
-npm run dev                                # http://localhost:3290
+npm run dev                                # http://localhost:3340
 ```
 
-`bash start.sh` 会建 venv、检查数据库、启动前后端；注意它按 `3345/3340` 启动，而 Vite dev server 监听 `3290` 并代理到 `3295`，两者需对齐后再使用（见已知限制）。
+`bash start.sh` 会建 venv、检查数据库、启动前后端（3345/3340，与 `vite.config.ts` 一致）。
 
 ### 方式三：本地开发（Windows PowerShell）
 
@@ -174,12 +183,12 @@ Copy-Item backend\.env.example backend\.env
 
 # 3) 后端（终端 A）
 Set-Location backend
-..\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 3295 --reload
+..\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 3345 --reload
 
 # 4) 前端（终端 B）
 Set-Location frontend
 npm install
-npm run dev        # http://localhost:3290
+npm run dev        # http://localhost:3340
 ```
 
 > SQLite 模式下 `database_patches.ensure_extra_columns` 的 PG 语句会被跳过；首次建表由 `create_all()` 完成，功能不受影响（pgvector 仅后续 RAG 需要）。
@@ -188,9 +197,11 @@ npm run dev        # http://localhost:3290
 
 1. 打开前端 → 用默认管理员登录（或注册新账号）。
 2. 「工程文件」→ 上传 Altium 工程文件 → 后台解析 → 查看原理图/PCB/元件/网络/BOM。
-3. 「对话工作台」→ 选择助手、关联工程、按需勾选技能 → 提问（无 API Key 时走内置 mock 引擎）。
-4. 「Altium 连接」→ 填写网关地址（如 `http://192.168.1.14:3296`）→ 测试连接 → 实时面板。
-5. 连接在线时，工作台右侧自动显示 Altium 当前 PCB，并可直接让 AI 执行只读/写命令。
+3. 「AI 配置」→「大模型」→ 新增模型（可用预设模板一键填 Base URL 与模型名）→ 填入 API Key → 测试连接 → 设为默认；列表只显示密钥掩码。**未配置任何模型时对话仍可用内置 mock 引擎。**
+4. 「AI 配置」→「助手 / 技能」→ 调整人设、系统提示词、推荐技能与技能提示词；助手可绑定模型并覆盖温度 / 最大 Tokens。
+5. 「对话工作台」→ 选择助手、关联工程、按需勾选技能 → 提问。
+6. 「Altium 连接」→ 填写网关地址（如 `http://192.168.1.14:3296`）→ 测试连接 → 实时面板。
+7. 连接在线时，工作台右侧自动显示 Altium 当前 PCB，并可直接让 AI 执行只读/写命令。
 
 ## 配置参考
 
@@ -206,6 +217,13 @@ npm run dev        # http://localhost:3290
 | `DATA_DIR` | `./data` | 上传文件与 SVG 渲染产物根目录（容器内 `/data`） |
 | `JWT_EXPIRE_DAYS` | `7` | Token 有效期 |
 | `GATEWAY_URL` | `http://localhost:3296` | 预留项，当前连接地址以数据库中的连接记录为准 |
+| `AI_SECRET_KEY` | 空 | API Key 加密密钥；留空时由 `SECRET_KEY` 派生（换此值会使已存密钥无法解密） |
+| `AI_CONFIG_WRITE_ADMIN_ONLY` | `true` | 为 `true` 时模型配置的增删改与连接测试仅管理员可用（聊天不受限） |
+| `AI_MODEL_TEST_TIMEOUT` | `8.0` | 「测试连接」超时（秒） |
+| `AI_ALLOW_PRIVATE_MODEL_HOSTS` | `true` | 是否允许本地/私网地址（ollama / llama.cpp 必需）；云端 provider 填私网地址会被拒绝 |
+| `AI_DEFAULT_TEMPERATURE` / `AI_DEFAULT_MAX_TOKENS` | `0.4` / `4096` | 新建模型配置时的默认采样参数 |
+
+> `backend/.env.example` 目前只列了前 5 个变量，其余按需手写。
 
 ### 网关环境变量（Windows 机器）
 
@@ -240,9 +258,11 @@ npm run dev        # http://localhost:3290
 
 - 系统提示词 = `BASE_PROMPT` + 助手人设 + 命中技能提示词 + 设计上下文（`orchestrator.compose_system_prompt`）。
 - 上下文双通道：关联工程时用离线快照摘要（元件前 25、网络前 30、BOM 前 12、单端网络提示）；未关联工程时自动取第一条 `connected` 网关的实时摘要。
-- 技能编排打分：`code` 命中 50、技能名 40、每个关键词 15、助手绑定 10；阈值 15，默认 Top-3。
+- 技能编排打分：`code` 命中 50、技能名 40、每个关键词 15、助手绑定 10、技能优先级 0–10；`extra_config.negative_keywords` 命中扣 40（避免近义技能互相误命中）；阈值 15，默认 Top-3。
 - 历史窗口 20 条消息；会话与消息入库，SSE 事件回显激活技能与工具调用。
-- SSE 事件：`meta`、`skills_activated`、`delta`、`tool_call`、`tool_result`、`tool_confirmation_required`、`error`、`done`。
+- 模型解析五层：请求 `modelConfigId` → 会话绑定 → 助手绑定 → 系统默认 → 首个可用配置；候选会跳过已停用/软删、以及需要密钥却未配置密钥的 provider；无可用模型时抛 `NoAvailableModelError`（SSE `code=no_model`），前端给「去配置模型」入口。
+- 工具裁剪：仅当模型 `supportsTools=true` 时注入 tools，并按「助手 `tool_codes` ∪ 各技能 `tool_codes`」取交集；空集合 = 全部。
+- SSE 事件：`meta`（含 `provider` / `modelName` / `resolution`）、`skills_activated`、`delta`、`tool_call`、`tool_result`、`tool_confirmation_required`、`error`（含 `code`）、`done`（含 `durationMs` 与 `usage`）。
 
 ### 3. AI 工具调用与写操作确认
 
@@ -306,9 +326,10 @@ npm run dev        # http://localhost:3290
 | 工程 | `GET/POST /files/projects`、`GET/DELETE /files/projects/{id}`、`POST /files/projects/{id}/reparse` |
 | 工程数据 | `GET /files/projects/{id}/components`、`/nets`、`/nets/{net}`、`/bom`、`/svgs`、`/svgs/{svgId}` |
 | 对话 | `POST /ai/chat/stream`（SSE）、`GET /ai/conversations`、`GET /ai/conversations/{id}/messages`、`DELETE /ai/conversations/{id}` |
-| 模型 | `GET/POST /ai/models`、`PUT/DELETE /ai/models/{id}` |
-| 技能 | `GET/POST /ai/skills`、`PUT/DELETE /ai/skills/{id}`、`POST /ai/skills/resolve` |
-| 助手 | `GET/POST /ai/assistants`、`PUT/DELETE /ai/assistants/{id}`、`POST /ai/assistants/{id}/default` |
+| 模型 | `GET/POST /ai/models`、`PUT/DELETE /ai/models/{id}`、`GET /ai/models/providers`、`GET /ai/models/export?format=json\|csv`、`POST /ai/models/test`、`POST /ai/models/{id}/test`（别名 `/test-connection`）、`POST /ai/models/{id}/default`、`POST /ai/models/{id}/duplicate` |
+| 技能 | `GET/POST /ai/skills`、`PUT/DELETE /ai/skills/{id}`、`POST /ai/skills/resolve`、`POST /ai/skills/{id}/duplicate` |
+| 助手 | `GET/POST /ai/assistants`、`PUT/DELETE /ai/assistants/{id}`、`POST /ai/assistants/{id}/default`、`POST /ai/assistants/{id}/duplicate`（别名 `/clone`）、`POST /ai/assistants/{id}/prompt-preview` |
+| AI 工具 | `GET /ai/tools/registry`（工具选择器数据源，含 gateway 动态工具） |
 | 实时连接 | `GET/POST /altium/connections`、`POST /{id}/test`、`POST /{id}/command`、`GET /{id}/live/summary`、`GET /{id}/screenshot`、`GET /altium/connections/first-connected`、`DELETE /{id}` |
 | 健康检查 | `GET /health` |
 
@@ -320,10 +341,19 @@ npm run dev        # http://localhost:3290
 # gateway：协议编解码、命令注册表、dry-run/确认、mock 驱动
 cd gateway
 .\.venv\Scripts\python.exe -m pytest -q      # 12 passed
+
+# AI 平台自检（无需数据库）：端点 / 模型与助手技能新增列 / 迁移语句 / 密钥加密 / provider 注册表 / SSRF 策略
+cd ..\backend
+..\.venv\Scripts\python.exe -B ..\test\check_ai_platform.py    # 12 passed
+
+# AI 平台端到端冒烟（临时 SQLite，不依赖 PostgreSQL）：登录 → 工具注册表 → 模型 CRUD/测试/导出/默认 → 技能解析 → 提示词预览 → SSE 对话落库
+cd ..
+.\.venv\Scripts\python.exe -B test\smoke_ai_platform.py         # 20 passed
 ```
 
 - 前端检查：`cd frontend && npm run lint && npm run build`（`tsc -b` + Vite 构建）。
-- 后端暂无自动化测试；worker 协议与快照结构建议作为下一步 pytest 基线（见已知限制）。
+- 脚本清单见 [test/README.md](test/README.md)。
+- 其余后端逻辑（worker 协议、快照结构、文件解析）尚无 pytest 覆盖，建议作为下一步基线（见已知限制）。
 
 ## 部署到服务器
 
@@ -338,17 +368,23 @@ bash scripts/deploy-remote.sh                      # rsync + 远程 compose 构�
 
 | # | 问题 | 影响 | 建议 |
 |---|---|---|---|
-| 1 | `start.sh` 使用 3345/3340，而 `vite.config.ts` 为端口 3290、代理到 3295 | `bash start.sh` 的前端会开在 3290 且代理不到 3345 后端 | 统一两端端口（推荐把 vite 改回 3340/3345，或用环境变量覆盖） |
+| 1 | ~~`start.sh` 3345/3340 与 `vite.config.ts` 3290/3295 不一致~~ **已修复（2026-10-18）** | — | 端口统一为 3340/3345（dev/容器/生产一致），见[端口与地址](#端口与地址) |
 | 2 | 无 Alembic 迁移（启动 `create_all` + PG 补列） | 改表需手写 DDL，SQLite 无法执行补列语句 | M0 收尾引入 alembic 基线 |
-| 3 | AI API Key 明文存储，且 `GET /ai/models` 原样回显 | 密钥泄露风险 | Fernet 加密落库 + 列表脱敏 |
+| 3 | ~~AI API Key 明文存储且原样回显~~ **已修复** | — | Fernet（`enc:v1:`）加密落库，响应只给 `hasKey` / `keyHint`，历史明文启动时自动升级 |
 | 4 | 写命令无审计、撤销、事务回滚、幂等键 | 不满足 ADR-001 生产要求 | 命令审计表 + 快照/撤销 + 请求 ID |
 | 5 | 网关 `/mcp` 未挂载（仅文档字符串提及） | 无法用 REST 端口连 MCP | 在 `app.py` 挂载 FastMCP ASGI，或只用 stdio |
 | 6 | `GET /api/v1/health` 的 `gatewayEnabled` 恒为 `false` | 该字段不代表实时状态 | 改查 `alt_connections` 或删除该字段 |
 | 7 | `design_context` 中板框尺寸除以 1000 却仍标注 mil | AI 上下文里的板框数值偏小 | 与快照/前端口径统一（快照已是 mils） |
 | 8 | 个别 PcbDoc（如 jlink_pcb）嵌入字体损坏、板框原点非零 | PCB SVG 视口异常 | worker 增加 viewBox/包围盒归一化；向 altium-monkey 反馈 |
-| 9 | 仓库根目录遗留约百个调试脚本/截图（`*.ps1`、`*.png`、`alivetest.ps1` 等） | 仓库噪音、误提交风险 | 归档到 `scripts/debug/` 或删除后补 `.gitignore` |
+| 9 | `test/` 手动脚本仍含本机硬编码路径（`E:\Projects\...`、`C:\Users\SEEYAO\...`） | 换机复用前需改路径 | 按需参数化；新截图放 `screenshots/`、新调试脚本放 `test/`，无长期价值直接删除 |
 | 10 | 后端无测试、SSE 无心跳/断线重连、PCB 预览无缩放/层开关 | 回归与体验 | pytest + 心跳 + 画布控件 |
 | 11 | DelphiScript 脚本按公开 RTL API 编写 | 不同 Altium 版本可能需要真机微调 | 已有逐字段 try/except；按版本做兼容矩阵 |
+| 12 | AI 平台新增列（JSONB / TIMESTAMPTZ）的迁移语句未在真实 PostgreSQL 库执行过（SQLite 冒烟只覆盖逻辑） | 缺列导致查询报错 | 重启后端会自动执行；也可手动 `backend/scripts/migrate_ai_platform.py` |
+| 13 | 模型配置写操作默认限管理员（`AI_CONFIG_WRITE_ADMIN_ONLY=true`） | 单人开发时被 403 | 需要放开时在 `backend/.env` 置 `false` |
+| 14 | 旧的 `backend/app/services/ai/providers.py` 已停用但文件仍在（同名 `providers/` 包优先导入） | 阅读时易混淆 | 手工 `git rm backend/app/services/ai/providers.py` |
+| 12 | AI 平台新增列（JSONB / TIMESTAMPTZ）的迁移语句未在真实 PostgreSQL 库执行过（SQLite 冒烟只覆盖逻辑） | 缺列导致查询报错 | 重启后端会自动执行；也可手动 `backend/scripts/migrate_ai_platform.py` |
+| 13 | 模型配置写操作默认限管理员（`AI_CONFIG_WRITE_ADMIN_ONLY=true`） | 单人开发时被 403 | 需要放开时在 `backend/.env` 置 `false` |
+| 14 | 旧的 `backend/app/services/ai/providers.py` 已停用但文件仍在（同名 `providers/` 包优先导入） | 阅读时易混淆 | 手工 `git rm backend/app/services/ai/providers.py` |
 
 ## 安全与合规
 
@@ -363,6 +399,8 @@ bash scripts/deploy-remote.sh                      # rsync + 远程 compose 构�
 - ✅ 第一阶段：平台前后端 + Altium 文件离线读取/查看
 - ✅ 第二阶段：实时连接（gateway + DelphiScript 桥 + MCP server + 平台接入）
 - ✅ 工具链首版：gateway 工具动态注册、function calling、dry-run + 人工确认（3 个写命令）
+- ✅ AI 平台对齐：独立模型配置页（卡片/列表双视图、搜索筛选、连接测试、设默认、复制、导出）、五层 LLM 路由、API Key 加密存储；助手与技能扩展（采样覆盖、工具子集、技能优先级、提示词预览）
+- ✅ AI 平台对齐：独立模型配置页（卡片/列表双视图、搜索筛选、连接测试、设默认、复制、导出）、五层 LLM 路由、API Key 加密存储；助手与技能扩展（采样覆盖、工具子集、技能优先级、提示词预览）
 - 第三步：规则引擎（ERC/DRC/DFM）+ AI 审查报告 + RAG 知识库（pgvector）
 - 第四步：元件选型 / BOM 风险 / 替代料
 - 第五步：完整意图命令层（ADR-001）——命令审计、事务与撤销、更多原语/意图命令、端到端评测
@@ -373,6 +411,8 @@ bash scripts/deploy-remote.sh                      # rsync + 远程 compose 构�
 - [ADR-001 语义描述到设计输出的执行路径](docs/design/adr/ADR-001-semantic-to-design-execution.md)
 - [ADR-002 altium-monkey 离线引擎（含 AGPL 策略）](docs/design/adr/ADR-002-altium-monkey-offline-engine.md)
 - [模块开发规范](docs/design/module-conventions.md)
+- [AI 平台对齐设计（大模型配置 / 助手 / 技能）](docs/design/ai-platform-alignment-design.md)
+- [AI 平台对齐设计（大模型配置 / 助手 / 技能）](docs/design/ai-platform-alignment-design.md)
 - [第一阶段完成度审计](docs/design/phase1-completion-audit.md)
 - [网关部署与协议细节](gateway/README.md)
 - [前端开发说明](frontend/README.md)

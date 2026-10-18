@@ -34,7 +34,7 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "3345:3295"
+      - "3345:3345"
 
   frontend:
     build: ./frontend

@@ -37,21 +37,11 @@ async def bootstrap() -> None:
         elif settings.admin_bootstrap_reset_password:
             admin.password_hash = hash_password(settings.admin_password)
             logger.info("已重置管理员密码")
-        if (await db.execute(select(AIModelConfig).where(AIModelConfig.is_deleted.is_(False)))).scalars().first() is None:
-            db.add(
-                AIModelConfig(
-                    name="演示引擎（无需 Key）",
-                    provider="mock",
-                    model_name="mock-1",
-                    is_default=True,
-                    remark="内置确定性演示模型，配置真实 API Key 后可切换",
-                )
-            )
-            logger.info("已内置 mock 模型")
+        from app.services.ai.seed_data import seed_models, seed_skills_and_assistants, upgrade_legacy_api_keys
 
-        from app.services.ai.seed_data import seed_skills_and_assistants
-
+        await seed_models(db)
         await seed_skills_and_assistants(db)
+        await upgrade_legacy_api_keys(db)
         await db.commit()
 
 
@@ -66,7 +56,7 @@ def create_app() -> FastAPI:
     app = FastAPI(title="AIDriveAltium API", version="0.1.0", lifespan=lifespan)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:3290", "http://127.0.0.1:3290", "http://localhost:5173"],
+        allow_origins=["http://localhost:3340", "http://127.0.0.1:3340", "http://localhost:5173"],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

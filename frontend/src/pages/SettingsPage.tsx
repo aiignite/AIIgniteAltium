@@ -1,195 +1,131 @@
 import { useEffect, useState } from 'react'
+import { Badge, Box, Button, Group, Paper, SimpleGrid, Text, ThemeIcon } from '@mantine/core'
 import {
-  ActionIcon,
-  Badge,
-  Button,
-  Group,
-  Modal,
-  Paper,
-  Select,
-  Switch,
-  Table,
-  Text,
-  TextInput,
-  Textarea,
-} from '@mantine/core'
-import { IconPencil, IconTrash } from '@tabler/icons-react'
+  IconArrowRight,
+  IconBrain,
+  IconDatabase,
+  IconLock,
+  IconPlugConnected,
+} from '@tabler/icons-react'
+import { useNavigate } from 'react-router-dom'
 import { api } from '../api/client'
-
-interface AIModel {
-  id: string
-  name: string
-  provider: string
-  baseUrl: string
-  apiKey: string
-  modelName: string
-  isDefault: boolean
-  enabled: boolean
-  remark: string
-}
-
-const PROVIDER_LABEL: Record<string, string> = {
-  mock: '演示引擎（内置）',
-  openai: 'OpenAI 兼容（OpenAI/Ollama/DeepSeek…）',
-  anthropic: 'Anthropic',
-}
-
-const emptyModel: AIModel = {
-  id: '',
-  name: '',
-  provider: 'openai',
-  baseUrl: 'https://api.openai.com/v1',
-  apiKey: '',
-  modelName: 'gpt-4o-mini',
-  isDefault: false,
-  enabled: true,
-  remark: '',
-}
+import type { AIModelItem } from '../components/ai/types'
 
 export function SettingsPage() {
-  const [models, setModels] = useState<AIModel[]>([])
-  const [opened, setOpened] = useState(false)
-  const [editing, setEditing] = useState<AIModel>(emptyModel)
+  const navigate = useNavigate()
+  const [models, setModels] = useState<AIModelItem[]>([])
   const [error, setError] = useState('')
 
-  const load = () => api.get<AIModel[]>('/ai/models').then(setModels)
   useEffect(() => {
-    load()
+    api
+      .get<AIModelItem[]>('/ai/models')
+      .then(setModels)
+      .catch((e) => setError(e instanceof Error ? e.message : '加载失败'))
   }, [])
 
-  const save = async () => {
-    setError('')
-    try {
-      const body = { ...editing }
-      if (editing.id) await api.put(`/ai/models/${editing.id}`, body)
-      else await api.post('/ai/models', body)
-      setOpened(false)
-      load()
-    } catch (e) {
-      setError(e instanceof Error ? e.message : '保存失败')
-    }
-  }
+  const enabled = models.filter((m) => m.enabled)
+  const withKey = models.filter((m) => m.hasKey || m.provider === 'mock')
+  const defaultModel = models.find((m) => m.isDefault)
 
   return (
-    <Paper withBorder p="md">
-      <Group justify="space-between" mb="md">
-        <Text fw={600}>AI 模型配置</Text>
-        <Button
-          onClick={() => {
-            setEditing(emptyModel)
-            setOpened(true)
-          }}
-        >
-          新增模型
-        </Button>
-      </Group>
-      <Table.ScrollContainer minWidth={700}>
-        <Table verticalSpacing="xs">
-          <Table.Thead>
-            <Table.Tr>
-              <Table.Th>名称</Table.Th>
-              <Table.Th>Provider</Table.Th>
-              <Table.Th>模型</Table.Th>
-              <Table.Th>Base URL</Table.Th>
-              <Table.Th>状态</Table.Th>
-              <Table.Th style={{ textAlign: 'right' }}>操作</Table.Th>
-            </Table.Tr>
-          </Table.Thead>
-          <Table.Tbody>
-            {models.map((m) => (
-              <Table.Tr key={m.id}>
-                <Table.Td>
-                  {m.name} {m.isDefault && <Badge size="sm" variant="light">默认</Badge>}
-                </Table.Td>
-                <Table.Td>{PROVIDER_LABEL[m.provider] ?? m.provider}</Table.Td>
-                <Table.Td>{m.modelName}</Table.Td>
-                <Table.Td>{m.baseUrl || '-'}</Table.Td>
-                <Table.Td>
-                  <Badge color={m.enabled ? 'green' : 'gray'} variant="light">
-                    {m.enabled ? '启用' : '停用'}
-                  </Badge>
-                </Table.Td>
-                <Table.Td style={{ textAlign: 'right' }}>
-                  <ActionIcon
-                    variant="subtle"
-                    title="编辑"
-                    onClick={() => {
-                      setEditing(m)
-                      setOpened(true)
-                    }}
-                  >
-                    <IconPencil size={16} />
-                  </ActionIcon>
-                  <ActionIcon
-                    variant="subtle"
-                    color="red"
-                    title="删除"
-                    onClick={async () => {
-                      await api.delete(`/ai/models/${m.id}`)
-                      load()
-                    }}
-                  >
-                    <IconTrash size={16} />
-                  </ActionIcon>
-                </Table.Td>
-              </Table.Tr>
-            ))}
-          </Table.Tbody>
-        </Table>
-      </Table.ScrollContainer>
-
-      <Modal opened={opened} onClose={() => setOpened(false)} title={editing.id ? '编辑模型' : '新增模型'} size="lg">
-        <TextInput label="名称" value={editing.name} onChange={(e) => setEditing({ ...editing, name: e.target.value })} mb="sm" />
-        <Select
-          label="Provider"
-          data={Object.entries(PROVIDER_LABEL).map(([v, l]) => ({ value: v, label: l }))}
-          value={editing.provider}
-          onChange={(v) => {
-            const provider = v ?? 'openai'
-            setEditing({
-              ...editing,
-              provider,
-              baseUrl: provider === 'anthropic' ? 'https://api.anthropic.com' : provider === 'openai' ? 'https://api.openai.com/v1' : '',
-              modelName: provider === 'mock' ? 'mock-1' : editing.modelName,
-            })
-          }}
-          mb="sm"
-        />
-        {editing.provider !== 'mock' && (
-          <>
-            <TextInput
-              label="Base URL（Ollama 可填 http://localhost:11434/v1）"
-              value={editing.baseUrl}
-              onChange={(e) => setEditing({ ...editing, baseUrl: e.target.value })}
-              mb="sm"
-            />
-            <TextInput
-              label="API Key"
-              value={editing.apiKey}
-              onChange={(e) => setEditing({ ...editing, apiKey: e.target.value })}
-              mb="sm"
-            />
-            <TextInput label="模型名" value={editing.modelName} onChange={(e) => setEditing({ ...editing, modelName: e.target.value })} mb="sm" />
-          </>
-        )}
-        <Group mb="sm">
-          <Switch
-            label="设为默认"
-            checked={editing.isDefault}
-            onChange={(e) => setEditing({ ...editing, isDefault: e.currentTarget.checked })}
-          />
-          <Switch label="启用" checked={editing.enabled} onChange={(e) => setEditing({ ...editing, enabled: e.currentTarget.checked })} />
+    <Box>
+      <Paper radius="xl" p="lg" mb="md" withBorder>
+        <Group justify="space-between" wrap="nowrap">
+          <Box>
+            <Group gap="xs">
+              <ThemeIcon size={36} radius={10} variant="light" color="orange">
+                <IconBrain size={20} />
+              </ThemeIcon>
+              <Text fw={800} size="lg">
+                AI 平台
+              </Text>
+            </Group>
+            <Text size="sm" c="dimmed" mt={6} maw={620}>
+              模型配置、助手人设与技能库统一在「AI 配置」中维护。密钥加密存储，界面与导出均只显示掩码。
+            </Text>
+            <Group gap="xs" mt="sm">
+              <Badge variant="light" color="orange">
+                模型 {models.length}
+              </Badge>
+              <Badge variant="light" color="green">
+                启用 {enabled.length}
+              </Badge>
+              <Badge variant="light" color="blue">
+                可用 {withKey.length}
+              </Badge>
+              <Badge variant="light" color="yellow">
+                默认 {defaultModel?.name ?? '未设置'}
+              </Badge>
+            </Group>
+          </Box>
+          <Button
+            rightSection={<IconArrowRight size={16} />}
+            onClick={() => navigate('/ai-config?tab=models')}
+            style={{ background: 'linear-gradient(135deg, #f97316 0%, #ea580c 100%)', border: 0 }}
+          >
+            打开 AI 配置
+          </Button>
         </Group>
-        <Textarea label="备注" value={editing.remark} onChange={(e) => setEditing({ ...editing, remark: e.target.value })} mb="sm" />
-        {error && (
-          <Text c="red" size="sm" mb="sm">
-            {error}
-          </Text>
-        )}
-        <Button fullWidth onClick={save}>
-          保存
-        </Button>
-      </Modal>
+      </Paper>
+
+      {error && (
+        <Text size="xs" c="red.7" mb="sm">
+          {error}
+        </Text>
+      )}
+
+      <SimpleGrid cols={{ base: 1, sm: 3 }} spacing="md">
+        <SettingCard
+          icon={<IconPlugConnected size={18} />}
+          title="模型与路由"
+          desc="Provider、Base URL、采样参数、工具/图像能力；请求按「请求 → 会话 → 助手 → 默认」解析。"
+          action="管理模型"
+          onClick={() => navigate('/ai-config?tab=models')}
+        />
+        <SettingCard
+          icon={<IconLock size={18} />}
+          title="密钥安全"
+          desc="API Key 写入即加密（enc:v1），列表仅回传尾号掩码；历史明文在启动时自动升级。"
+          action="查看模型"
+          onClick={() => navigate('/ai-config?tab=models')}
+        />
+        <SettingCard
+          icon={<IconDatabase size={18} />}
+          title="数据与迁移"
+          desc="新增列由幂等 ALTER 保证；可执行 backend/scripts/migrate_ai_platform.py 单独重放。"
+          action="查看助手"
+          onClick={() => navigate('/ai-config?tab=assistants')}
+        />
+      </SimpleGrid>
+    </Box>
+  )
+}
+
+interface SettingCardProps {
+  icon: React.ReactNode
+  title: string
+  desc: string
+  action: string
+  onClick: () => void
+}
+
+function SettingCard({ icon, title, desc, action, onClick }: SettingCardProps) {
+  return (
+    <Paper withBorder radius="lg" p="md">
+      <Group gap="xs" mb={6}>
+        <ThemeIcon size={30} radius={8} variant="light" color="gray">
+          {icon}
+        </ThemeIcon>
+        <Text size="sm" fw={700}>
+          {title}
+        </Text>
+      </Group>
+      <Text size="xs" c="dimmed" mih={54}>
+        {desc}
+      </Text>
+      <Button size="compact-xs" variant="light" mt="sm" onClick={onClick}>
+        {action}
+      </Button>
     </Paper>
   )
 }

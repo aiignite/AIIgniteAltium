@@ -92,9 +92,15 @@ export interface ChatStreamEvent {
   title?: string
   assistantId?: string | null
   assistantName?: string | null
+  /** meta 事件：本次实际使用的模型与解析来源 */
+  modelName?: string
+  provider?: string
+  resolution?: string
   skills?: ActivatedSkill[]
   text?: string
   message?: string
+  /** 错误分类（no_model / auth / rate / network …） */
+  code?: string
   messageId?: string
   durationMs?: number
   /** 工具名（tool_call / tool_result / tool_confirmation_required） */

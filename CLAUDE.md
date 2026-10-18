@@ -21,3 +21,11 @@
 
 ## 运行
 - `bash start.sh`；端口 3340/3345（门户子路径 /altium/）；库 aidrive_altium（pgvector 已启用）
+
+## 截图与调试产物
+- 所有截图统一放 `screenshots/`（`.gitignore` 忽略内容、仅保留 `screenshots/README.md`）；`test/shot.ps1` 已默认输出到该目录
+- 新截图命名 `<主题>-<YYYYMMDD-HHmmss>.png`；不要再把截图写到仓库根目录或模块目录
+- 需要作为文档证据入库存档时，用 `git add -f screenshots/<文件>` 显式加入
+- 一次性调试脚本统一放 `test/`（清单见 `test/README.md`），不要再散落到仓库根目录；无长期价值时直接删除
+
+
