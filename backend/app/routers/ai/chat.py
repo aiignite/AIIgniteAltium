@@ -13,7 +13,8 @@ from app.models.ai.conversation import Conversation, Message
 from app.models.system.user import User
 from app.schemas import CamelModel
 from app.security import get_current_user
-from app.services.ai.orchestrator import stream_reply
+from app.services.ai.orchestrator import preflight_chat, stream_reply
+from app.services.ai.access import get_owned_conversation
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/ai", tags=["ai"])
@@ -23,6 +24,7 @@ class ChatStreamIn(CamelModel):
     content: str = Field(min_length=1, max_length=20000)
     conversation_id: UUID | None = None
     project_id: UUID | None = None
+    connection_id: UUID | None = None
     assistant_id: UUID | None = None
     skill: str | None = None  # 兼容旧客户端：单技能 code
     skills: list[str] | None = None  # 技能 code 列表（优先于 skill）
@@ -33,6 +35,7 @@ class ConversationOut(CamelModel):
     id: str
     title: str
     project_id: str | None
+    connection_id: str | None
     assistant_id: str | None
     skill: str
     message_count: int
@@ -57,6 +60,7 @@ def _conv_out(c: Conversation) -> ConversationOut:
         id=str(c.id),
         title=c.title,
         project_id=str(c.project_id) if c.project_id else None,
+        connection_id=str(c.connection_id) if c.connection_id else None,
         assistant_id=str(c.assistant_id) if c.assistant_id else None,
         skill=c.skill,
         message_count=c.message_count,
@@ -86,6 +90,10 @@ async def chat_stream(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
+    await preflight_chat(db, user_id=user.id, conversation_id=body.conversation_id,
+                         project_id=body.project_id, connection_id=body.connection_id,
+                         assistant_id=body.assistant_id, model_config_id=body.model_config_id)
+
     async def event_source():
         async for event in stream_reply(
             db,
@@ -93,6 +101,7 @@ async def chat_stream(
             content=body.content,
             conversation_id=body.conversation_id,
             project_id=body.project_id,
+            connection_id=body.connection_id,
             skill=body.skill,
             skills=body.skills,
             assistant_id=body.assistant_id,
@@ -127,9 +136,7 @@ async def list_messages(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[MessageOut]:
-    conversation = await db.get(Conversation, conversation_id)
-    if conversation is None or conversation.is_deleted or conversation.user_id != user.id:
-        raise HTTPException(status_code=404, detail="对话不存在")
+    await get_owned_conversation(db, conversation_id, user.id)
     result = await db.execute(
         select(Message).where(Message.conversation_id == conversation_id).order_by(Message.seq)
     )

@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import {
+  ActionIcon,
   Box,
   Button,
   Group,
@@ -11,7 +13,10 @@ import {
   Tooltip,
 } from '@mantine/core'
 import {
+  IconCheck,
+  IconCopy,
   IconHistory,
+  IconPlayerStop,
   IconPlus,
   IconSend,
   IconSparkles,
@@ -68,10 +73,26 @@ interface ConversationItem {
   id: string
   title: string
   projectId: string | null
+  connectionId: string | null
   assistantId: string | null
   skill: string
   messageCount: number
   updatedAt: string
+}
+
+interface ConnectionItem {
+  id: string
+  name: string
+  baseUrl: string
+  status: string
+}
+
+type SourceKind = 'none' | 'project' | 'live'
+
+const SOURCE_LABEL: Record<SourceKind, string> = {
+  none: '无设计来源',
+  project: '离线解析工程',
+  live: 'Altium 实时连接',
 }
 
 interface AIModelItem {
@@ -92,7 +113,10 @@ function timeAgo(iso: string): string {
 
 export function WorkbenchPage() {
   const [projects, setProjects] = useState<ProjectSummary[]>([])
+  const [source, setSource] = useState<SourceKind>('none')
   const [projectId, setProjectId] = useState<string | null>(null)
+  const [connections, setConnections] = useState<ConnectionItem[]>([])
+  const [connectionId, setConnectionId] = useState<string | null>(null)
   const [assistants, setAssistants] = useState<AssistantItem[]>([])
   const [assistantId, setAssistantId] = useState<string | null>(null)
   const [models, setModels] = useState<AIModelItem[]>([])
@@ -105,7 +129,11 @@ export function WorkbenchPage() {
   const [conversationId, setConversationId] = useState<string | null>(null)
   const [conversations, setConversations] = useState<ConversationItem[]>([])
   const [showHistory, setShowHistory] = useState(false)
+  const [copiedIndex, setCopiedIndex] = useState<number | null>(null)
+  const [searchParams] = useSearchParams()
   const viewportRef = useRef<HTMLDivElement>(null)
+  const stickToBottom = useRef(true)
+  const abortRef = useRef<AbortController | null>(null)
 
   const assistant = useMemo(
     () => assistants.find((a) => a.id === assistantId) ?? assistants.find((a) => a.isDefault) ?? null,
@@ -117,11 +145,26 @@ export function WorkbenchPage() {
   }, [])
 
   useEffect(() => {
+    const projectParam = searchParams.get('projectId')
+    const connectionParam = searchParams.get('connectionId')
     api.get<ProjectSummary[]>('/files/projects').then((ps) => {
       const ready = ps.filter((p) => p.status === 'ready')
       setProjects(ready)
-      if (ready.length > 0) setProjectId((prev) => prev ?? ready[0].id)
+      if (projectParam && ready.some((p) => p.id === projectParam)) {
+        setSource('project')
+        setProjectId(projectParam)
+      }
     })
+    api
+      .get<ConnectionItem[]>('/altium/connections')
+      .then((list) => {
+        setConnections(list)
+        if (connectionParam && list.some((c) => c.id === connectionParam)) {
+          setSource('live')
+          setConnectionId(connectionParam)
+        }
+      })
+      .catch(() => setConnections([]))
     api.get<AssistantItem[]>('/ai/assistants').then((list) => {
       setAssistants(list.filter((a) => a.enabled))
       setAssistantId((prev) => prev ?? list.find((a) => a.isDefault)?.id ?? list[0]?.id ?? null)
@@ -132,11 +175,13 @@ export function WorkbenchPage() {
       setModelId(list.find((m) => m.enabled)?.id ?? null)
     })
     loadConversations()
-  }, [loadConversations])
+  }, [loadConversations, searchParams])
 
   useEffect(() => {
-    viewportRef.current?.scrollTo({ top: viewportRef.current.scrollHeight })
+    if (stickToBottom.current) viewportRef.current?.scrollTo({ top: viewportRef.current.scrollHeight })
   }, [messages])
+
+  useEffect(() => () => abortRef.current?.abort(), [])
 
   // 技能编排：输入防抖 500ms 调 /ai/skills/resolve（对齐 AIIgnitePLM useSkillOrchestrator）
   useEffect(() => {
@@ -204,7 +249,9 @@ export function WorkbenchPage() {
             })),
         )
         setConversationId(c.id)
-        if (c.projectId) setProjectId(c.projectId)
+        setSource(c.connectionId ? 'live' : c.projectId ? 'project' : 'none')
+        setProjectId(c.projectId)
+        setConnectionId(c.connectionId)
         if (c.assistantId) setAssistantId(c.assistantId)
         if (c.skill) addSkillManually(c.skill)
       } catch {
@@ -223,56 +270,118 @@ export function WorkbenchPage() {
     setInput('')
   }, [])
 
+  const changeSource = useCallback(
+    (next: SourceKind) => {
+      if (streaming || next === source) return
+      setSource(next)
+      setProjectId(null)
+      setConnectionId(null)
+      resetConversation()
+    },
+    [streaming, source, resetConversation],
+  )
+
+  const chooseProject = useCallback(
+    (id: string | null) => {
+      if (streaming) return
+      setProjectId(id)
+      if (conversationId) resetConversation()
+    },
+    [streaming, conversationId, resetConversation],
+  )
+
+  const chooseConnection = useCallback(
+    (id: string | null) => {
+      if (streaming) return
+      setConnectionId(id)
+      if (conversationId) resetConversation()
+    },
+    [streaming, conversationId, resetConversation],
+  )
+
+  const sourceReady = source === 'none' || (source === 'project' ? !!projectId : !!connectionId)
+
   const send = useCallback(async () => {
     const content = input.trim()
-    if (!content || streaming) return
+    if (!content || streaming || !sourceReady) return
     setInput('')
     setCandidates((prev) => prev.filter((c) => c.selected))
     setMessages((prev) => [...prev, { role: 'user', content }, { role: 'assistant', content: '', skills: [] }])
+    const controller = new AbortController()
+    abortRef.current = controller
     setStreaming(true)
-    await streamChat(
-      {
-        content,
-        conversationId,
-        projectId: projectId || null,
-        assistantId: assistant?.id ?? null,
-        skills: selectedSkills.length > 0 ? selectedSkills : null,
-        modelConfigId: modelId || null,
-      },
-      (event: ChatStreamEvent) => {
-        if (event.type === 'meta' && event.conversationId) {
-          setConversationId(event.conversationId)
-          loadConversations()
-        }
-        if (event.type === 'skills_activated' && event.skills) {
-          const activated = event.skills
-          setMessages((prev) => {
-            const next = [...prev]
-            next[next.length - 1] = { ...next[next.length - 1], skills: activated }
-            return next
-          })
-        }
-        if (event.type === 'delta' && event.text)
-          setMessages((prev) => {
-            const next = [...prev]
-            next[next.length - 1] = {
-              ...next[next.length - 1],
-              role: 'assistant',
-              content: next[next.length - 1].content + event.text,
-            }
-            return next
-          })
-        if (event.type === 'error')
-          setMessages((prev) => {
-            const next = [...prev]
-            next[next.length - 1] = { ...next[next.length - 1], content: event.message ?? '出错了', error: true }
-            return next
-          })
-        if (event.type === 'done') setStreaming(false)
-      },
-    )
-    setStreaming(false)
-  }, [input, streaming, conversationId, projectId, assistant, selectedSkills, modelId, loadConversations])
+    try {
+      await streamChat(
+        {
+          content,
+          conversationId,
+          projectId: source === 'project' ? projectId : null,
+          connectionId: source === 'live' ? connectionId : null,
+          assistantId: assistant?.id ?? null,
+          skills: selectedSkills.length > 0 ? selectedSkills : null,
+          modelConfigId: modelId || null,
+        },
+        (event: ChatStreamEvent) => {
+          if (event.type === 'meta' && event.conversationId) {
+            setConversationId(event.conversationId)
+            loadConversations()
+          }
+          if (event.type === 'skills_activated' && event.skills) {
+            const activated = event.skills
+            setMessages((prev) => {
+              const next = [...prev]
+              next[next.length - 1] = { ...next[next.length - 1], skills: activated }
+              return next
+            })
+          }
+          if (event.type === 'delta' && event.text)
+            setMessages((prev) => {
+              const next = [...prev]
+              next[next.length - 1] = {
+                ...next[next.length - 1],
+                role: 'assistant',
+                content: next[next.length - 1].content + event.text,
+              }
+              return next
+            })
+          if (event.type === 'error')
+            setMessages((prev) => {
+              const next = [...prev]
+              next[next.length - 1] = { ...next[next.length - 1], content: event.message ?? '出错了', error: true }
+              return next
+            })
+        },
+        controller.signal,
+      )
+    } catch (err) {
+      // 用户主动停止：后端会保存已生成的部分内容，界面保留已有文本
+      if (!(err instanceof DOMException && err.name === 'AbortError')) {
+        setMessages((prev) => {
+          const next = [...prev]
+          next[next.length - 1] = { ...next[next.length - 1], content: '连接中断，请重试', error: true }
+          return next
+        })
+      }
+    } finally {
+      abortRef.current = null
+      setStreaming(false)
+      loadConversations()
+    }
+  }, [input, streaming, sourceReady, conversationId, source, projectId, connectionId, assistant, selectedSkills, modelId, loadConversations])
+
+  const stop = useCallback(() => {
+    abortRef.current?.abort()
+  }, [])
+
+  const copyMessage = useCallback(async (index: number, content: string) => {
+    try {
+      await navigator.clipboard.writeText(content)
+      setCopiedIndex(index)
+      window.setTimeout(() => setCopiedIndex((cur) => (cur === index ? null : cur)), 1500)
+    } catch {
+      /* 剪贴板不可用时保持无反馈 */
+    }
+  }, [])
 
   // 欢迎卡「建议这样提问」：绑定技能 → 技能式提问；否则通用引导
   const suggestions = useMemo(() => {
@@ -286,6 +395,13 @@ export function WorkbenchPage() {
     }
     return ['帮我审查这个工程的原理图', '总结当前设计的要点与风险', '分析一下这个工程的 BOM 构成']
   }, [messages.length, assistant, skills])
+
+  const sourceLabel =
+    source === 'project'
+      ? projects.find((p) => p.id === projectId)?.name ?? '未选择工程'
+      : source === 'live'
+        ? connections.find((c) => c.id === connectionId)?.name ?? '未选择连接'
+        : '无（仅对话）'
 
   return (
     <Group align="flex-start" gap="md" wrap="nowrap" style={{ height: 'calc(100vh - 90px)' }}>
@@ -320,6 +436,8 @@ export function WorkbenchPage() {
                   variant="subtle"
                   color="gray"
                   px={6}
+                  aria-label="历史对话"
+                  disabled={streaming}
                   onClick={() => setShowHistory((o) => !o)}
                   styles={{ root: { borderRadius: 8 } }}
                 >
@@ -331,6 +449,8 @@ export function WorkbenchPage() {
                   variant="subtle"
                   color="gray"
                   px={6}
+                  aria-label="新对话"
+                  disabled={streaming}
                   onClick={resetConversation}
                   styles={{ root: { borderRadius: 8 } }}
                 >
@@ -343,12 +463,15 @@ export function WorkbenchPage() {
             <Select
               size="xs"
               flex={1}
-              placeholder="关联设计工程"
-              data={projects.map((p) => ({ value: p.id, label: `${p.name}（${p.stats.componentCount ?? 0} 元件）` }))}
-              value={projectId}
-              onChange={setProjectId}
-              allowDeselect
-              clearable
+              aria-label="设计来源"
+              data={(Object.keys(SOURCE_LABEL) as SourceKind[]).map((value) => ({
+                value,
+                label: SOURCE_LABEL[value],
+              }))}
+              value={source}
+              onChange={(v) => changeSource((v as SourceKind) ?? 'none')}
+              disabled={streaming}
+              allowDeselect={false}
             />
             <Select
               size="xs"
@@ -357,8 +480,40 @@ export function WorkbenchPage() {
               data={models.map((m) => ({ value: m.id, label: m.name }))}
               value={modelId}
               onChange={setModelId}
+              disabled={streaming}
             />
           </Group>
+          {source === 'project' && (
+            <Select
+              size="xs"
+              mt={6}
+              placeholder="选择已解析工程"
+              aria-label="已解析工程"
+              data={projects.map((p) => ({ value: p.id, label: `${p.name}（${p.stats.componentCount ?? 0} 元件）` }))}
+              value={projectId}
+              onChange={chooseProject}
+              disabled={streaming}
+              allowDeselect={false}
+              nothingFoundMessage="暂无就绪工程，请先在「工程文件」上传解析"
+            />
+          )}
+          {source === 'live' && (
+            <Select
+              size="xs"
+              mt={6}
+              placeholder="选择已授权实时连接"
+              aria-label="实时连接"
+              data={connections.map((c) => ({
+                value: c.id,
+                label: `${c.name}（${c.status === 'connected' ? '已连接' : '未连接'}）`,
+              }))}
+              value={connectionId}
+              onChange={chooseConnection}
+              disabled={streaming}
+              allowDeselect={false}
+              nothingFoundMessage="暂无可用连接，请联系管理员授权"
+            />
+          )}
 
           {/* 历史面板 */}
           {showHistory && (
@@ -413,7 +568,15 @@ export function WorkbenchPage() {
         </Box>
 
         {/* 消息区 */}
-        <ScrollArea style={{ flex: 1 }} viewportRef={viewportRef} p="sm">
+        <ScrollArea
+          style={{ flex: 1 }}
+          viewportRef={viewportRef}
+          p="sm"
+          onScrollPositionChange={({ y }) => {
+            const el = viewportRef.current
+            if (el) stickToBottom.current = el.scrollHeight - y - el.clientHeight < 80
+          }}
+        >
           {messages.length === 0 ? (
             /* 欢迎卡（复刻 AIIgnitePLM 欢迎面板） */
             <Paper
@@ -433,11 +596,9 @@ export function WorkbenchPage() {
                   </Text>
                 </Box>
               </Group>
-              {projectId && (
-                <Text size="10px" c="dimmed" mt={8}>
-                  当前上下文：{projects.find((p) => p.id === projectId)?.name ?? '未选择工程'}
-                </Text>
-              )}
+              <Text size="10px" c="dimmed" mt={8}>
+                设计来源：{sourceLabel}
+              </Text>
               {suggestions.length > 0 && (
                 <Box mt="sm">
                   <Text size="11px" fw={600} c="dark" mb={4}>
@@ -500,6 +661,21 @@ export function WorkbenchPage() {
                     >
                       {m.content || (streaming && i === messages.length - 1 ? '思考中…' : '')}
                     </Box>
+                    {m.content && !m.error && (
+                      <Group gap={2} mt={2} justify="flex-end">
+                        <Tooltip label={copiedIndex === i ? '已复制' : '复制回答'}>
+                          <ActionIcon
+                            size="xs"
+                            variant="subtle"
+                            color="gray"
+                            aria-label="复制回答"
+                            onClick={() => copyMessage(i, m.content)}
+                          >
+                            {copiedIndex === i ? <IconCheck size={12} /> : <IconCopy size={12} />}
+                          </ActionIcon>
+                        </Tooltip>
+                      </Group>
+                    )}
                   </Box>
                 ),
               )}
@@ -550,7 +726,7 @@ export function WorkbenchPage() {
               minRows={2}
               maxRows={5}
               radius="lg"
-              placeholder={`与 ${assistant?.name ?? '通用硬件助手'} 对话，Enter 发送`}
+              placeholder={`与 ${assistant?.name ?? '通用硬件助手'} 对话，Enter 发送，Shift+Enter 换行`}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
@@ -560,30 +736,45 @@ export function WorkbenchPage() {
                 }
               }}
             />
-            <Button
-              onClick={send}
-              loading={streaming}
-              px="sm"
-              className="ai-gradient"
-              style={{ borderRadius: 12, border: 0 }}
-              leftSection={<IconSend size={15} />}
-            >
-              发送
-            </Button>
+            {streaming ? (
+              <Button
+                onClick={stop}
+                variant="light"
+                color="red"
+                px="sm"
+                style={{ borderRadius: 12 }}
+                leftSection={<IconPlayerStop size={15} />}
+              >
+                停止
+              </Button>
+            ) : (
+              <Button
+                onClick={send}
+                disabled={!sourceReady}
+                px="sm"
+                className="ai-gradient"
+                style={{ borderRadius: 12, border: 0 }}
+                leftSection={<IconSend size={15} />}
+              >
+                发送
+              </Button>
+            )}
           </Group>
         </Box>
       </Box>
 
       {/* ===== 右：设计数据 ===== */}
       <Box style={{ flex: 1, minWidth: 0, height: '100%' }} visibleFrom="md">
-        {projectId ? (
+        {source === 'project' && projectId ? (
           <DesignDataTabs projectId={projectId} />
         ) : (
           <Paper withBorder p="xl" h="100%" radius="lg">
             <Text c="dimmed" ta="center" mt="xl">
-              在左侧选择已解析的工程后，这里显示原理图/PCB 预览与元件、网络、BOM 数据。
+              {source === 'live'
+                ? '实时连接的设计数据可在「Altium 连接」页的实时面板中查看；本页只将实时摘要作为对话上下文。'
+                : '在左侧选择「离线解析工程」后，这里显示原理图/PCB 预览与元件、网络、BOM 数据。'}
               <br />
-              前往「工程文件」页上传 Altium 工程。
+              也可在「工程文件」页上传 Altium 工程。
             </Text>
           </Paper>
         )}

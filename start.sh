@@ -41,6 +41,14 @@ then
   exit 1
 fi
 
+if ! "$PY" -c 'import alembic, cryptography' >/dev/null 2>&1; then
+  echo "!! 请先更新后端依赖: $PY -m pip install -r $ROOT/backend/requirements.txt"
+  exit 1
+fi
+echo "-- 应用数据库迁移（存量未版本化库须先核对并显式 adopt-baseline）…"
+"$PY" -m alembic -c "$ROOT/backend/alembic.ini" upgrade head
+# 旧明文凭据不自动转换；备份后显式运行 python -m app.manage encrypt-credentials --backup-confirmed
+
 # 3. 停止旧进程
 pkill -f "uvicorn app.main:app" 2>/dev/null || true
 pkill -f "vite" 2>/dev/null || true
@@ -64,5 +72,5 @@ echo
 echo "== 启动完成 =="
 echo "  前端:   http://localhost:3340"
 echo "  后端API: http://localhost:3345/docs"
-echo "  默认管理员: admin@example.com / admin123456（见 backend/.env）"
+echo "  管理员凭据: 请使用 backend/.env 中显式配置的非默认凭据"
 echo "  日志: /tmp/aidrive_backend.log /tmp/aidrive_frontend.log"

@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models.system.user import User
 from app.schemas import CamelModel
-from app.security import create_access_token, get_current_user, hash_password, verify_password
+from app.security import create_access_token, get_current_user, hash_password, verify_password, require_admin
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -68,3 +68,15 @@ async def login(body: LoginIn, db: AsyncSession = Depends(get_db)) -> TokenOut:
 @router.get("/me", response_model=UserOut)
 async def me(user: User = Depends(get_current_user)) -> UserOut:
     return _user_out(user)
+
+
+class UserOptionOut(CamelModel):
+    id: str
+    email: str
+    display_name: str
+
+
+@router.get("/users/options", response_model=list[UserOptionOut])
+async def user_options(db: AsyncSession = Depends(get_db), _user=Depends(require_admin)):
+    users = (await db.execute(select(User).where(User.is_active.is_(True), User.is_deleted.is_(False)).order_by(User.email))).scalars()
+    return [UserOptionOut(id=str(u.id), email=u.email, display_name=u.display_name) for u in users]

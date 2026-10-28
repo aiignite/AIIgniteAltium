@@ -9,10 +9,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
+from app.models.files.snapshot_version import SnapshotVersion
 from app.models.files.uploaded_project import UploadedProject
 from app.schemas import CamelModel
 from app.security import get_current_user
 from app.services.files import parse_service
+from app.services.files.access import get_owned_project as _get_owned_project
+from app.services.files.jobs import ParseJobConflictError, enqueue_parse, require_enqueue
 
 router = APIRouter(prefix="/files/projects", tags=["files"])
 
@@ -26,12 +29,24 @@ class ProjectOut(CamelModel):
     stats: dict[str, Any] = {}
     svg_manifest: list[dict] = []
     parse_duration_ms: int = 0
+    current_version: int = 0
     created_at: str
     updated_at: str
 
 
 class ProjectDetailOut(ProjectOut):
     snapshot: dict[str, Any] = {}
+
+
+class VersionOut(CamelModel):
+    version: int
+    parse_duration_ms: int
+    created_at: str
+
+
+class VersionDetailOut(VersionOut):
+    snapshot: dict[str, Any] = {}
+    svg_manifest: list[dict] = []
 
 
 def _out(p: UploadedProject, *, with_snapshot: bool = False) -> dict[str, Any]:
@@ -44,19 +59,13 @@ def _out(p: UploadedProject, *, with_snapshot: bool = False) -> dict[str, Any]:
         "stats": (p.snapshot or {}).get("stats", {}),
         "svg_manifest": p.svg_manifest or [],
         "parse_duration_ms": p.parse_duration_ms,
+        "current_version": p.current_version or 0,
         "created_at": p.created_at.isoformat(),
         "updated_at": p.updated_at.isoformat(),
     }
     if with_snapshot:
         data["snapshot"] = p.snapshot or {}
     return data
-
-
-async def _get_owned_project(db: AsyncSession, project_id: UUID, user_id: UUID) -> UploadedProject:
-    project = await db.get(UploadedProject, project_id)
-    if project is None or project.is_deleted or str(project.user_id) != str(user_id):
-        raise HTTPException(status_code=404, detail="工程不存在")
-    return project
 
 
 @router.get("", response_model=list[ProjectOut])
@@ -74,7 +83,6 @@ async def list_projects(
 
 @router.post("", response_model=ProjectOut)
 async def upload_project(
-    background_tasks: BackgroundTasks,
     name: str = Form(""),
     files: list[UploadFile] = File(...),
     user=Depends(get_current_user),
@@ -96,31 +104,80 @@ async def upload_project(
     project = UploadedProject(
         user_id=str(user.id),
         name=project_name,
-        status="uploaded",
+        status="parsing",
         file_names=[n for n, _ in payloads],
     )
     db.add(project)
     await db.flush()
     await parse_service.save_uploaded_files(db, project, payloads)
+    await enqueue_parse(db, project.id)
     await db.commit()
     await db.refresh(project)
-    background_tasks.add_task(parse_service.parse_project, project.id)
     return _out(project)
 
 
 @router.post("/{project_id}/reparse", response_model=ProjectOut)
 async def reparse_project(
     project_id: UUID,
-    background_tasks: BackgroundTasks,
     user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     project = await _get_owned_project(db, project_id, user.id)
+    try:
+        await require_enqueue(db, project.id)
+    except ParseJobConflictError:
+        raise HTTPException(status_code=409, detail="已有解析任务进行中，请等待完成")
     project.status = "parsing"
+    project.error = ""
     await db.commit()
     await db.refresh(project)
-    background_tasks.add_task(parse_service.parse_project, project.id)
     return _out(project)
+
+
+@router.get("/{project_id}/versions", response_model=list[VersionOut])
+async def list_versions(
+    project_id: UUID,
+    user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    project = await _get_owned_project(db, project_id, user.id)
+    rows = await db.scalars(
+        select(SnapshotVersion)
+        .where(SnapshotVersion.project_id == project.id)
+        .order_by(SnapshotVersion.version.desc())
+    )
+    return [
+        {
+            "version": v.version,
+            "parse_duration_ms": v.parse_duration_ms,
+            "created_at": v.created_at.isoformat(),
+        }
+        for v in rows
+    ]
+
+
+@router.get("/{project_id}/versions/{version}", response_model=VersionDetailOut)
+async def get_version(
+    project_id: UUID,
+    version: int,
+    user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    project = await _get_owned_project(db, project_id, user.id)
+    row = await db.scalar(
+        select(SnapshotVersion).where(
+            SnapshotVersion.project_id == project.id, SnapshotVersion.version == version
+        )
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="版本不存在")
+    return {
+        "version": row.version,
+        "parse_duration_ms": row.parse_duration_ms,
+        "created_at": row.created_at.isoformat(),
+        "snapshot": row.snapshot or {},
+        "svg_manifest": row.svg_manifest or [],
+    }
 
 
 @router.get("/{project_id}", response_model=ProjectDetailOut)

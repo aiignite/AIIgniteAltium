@@ -10,5 +10,5 @@ from app.models.ai import (  # noqa: F401,E402
     Conversation,
     Message,
 )
-from app.models.files import UploadedProject  # noqa: F401,E402
-from app.models.altium import GatewayConnection  # noqa: F401,E402
+from app.models.files import ParseJob, ReviewRun, SnapshotVersion, UploadedProject  # noqa: F401,E402
+from app.models.altium import ConnectionGrant, GatewayConnection  # noqa: F401,E402

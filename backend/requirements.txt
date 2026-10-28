@@ -11,3 +11,5 @@ bcrypt>=4.1
 httpx[socks]>=0.27
 python-multipart>=0.0.9
 altium-monkey>=2026.9
+alembic>=1.13
+cryptography>=42

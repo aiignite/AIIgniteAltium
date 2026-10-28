@@ -1,80 +1,84 @@
-"""gateway REST 客户端：后端 → 局域网 Windows 机上的 altium-gateway(:3296)。"""
-
-import logging
+import asyncio
 from typing import Any
+from uuid import uuid4
 
 import httpx
 
-logger = logging.getLogger(__name__)
+from app.services.system.credentials import decrypt_credential
+from app.services.system.outbound import validate_outbound_url
 
 DEFAULT_TIMEOUT = httpx.Timeout(connect=4.0, read=8.0, write=4.0, pool=4.0)
 COMMAND_TIMEOUT = httpx.Timeout(connect=4.0, read=40.0, write=4.0, pool=4.0)
+# 仅幂等 GET 重试；命令、4xx、重定向一律不重试
+GET_ATTEMPTS = 3
+RETRY_BACKOFF_SECONDS = (0.2, 0.5)
 
 
 class GatewayError(RuntimeError):
-    pass
+    def __init__(self, category: str, status: int | None = None):
+        self.category, self.status, self.request_id = category, status, uuid4().hex
+        super().__init__(f"gateway_{category}; status={status or 'none'}; requestId={self.request_id}")
 
 
 class GatewayClient:
     def __init__(self, base_url: str, token: str = "") -> None:
-        self.base_url = base_url.rstrip("/")
+        self.base_url = base_url
         self.token = token
 
-    def _headers(self) -> dict[str, str]:
-        headers: dict[str, str] = {}
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
-        return headers
+    async def _request(self, method: str, path: str, *, payload=None, timeout=COMMAND_TIMEOUT,
+                       retryable: bool = False) -> httpx.Response:
+        base_url = await validate_outbound_url(self.base_url)
+        token = decrypt_credential(self.token)
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        attempts = GET_ATTEMPTS if retryable else 1
+        last_error: GatewayError | None = None
+        try:
+            async with httpx.AsyncClient(timeout=timeout, trust_env=False, follow_redirects=False) as client:
+                for attempt in range(attempts):
+                    try:
+                        resp = await client.request(method, base_url + path, json=payload, headers=headers)
+                    except httpx.HTTPError:
+                        last_error = GatewayError("transport")
+                        if attempt + 1 < attempts:
+                            await asyncio.sleep(RETRY_BACKOFF_SECONDS[min(attempt, len(RETRY_BACKOFF_SECONDS) - 1)])
+                            continue
+                        raise last_error from None
+                    if resp.status_code == 200:
+                        return resp
+                    if retryable and resp.status_code >= 500 and attempt + 1 < attempts:
+                        last_error = GatewayError("http", resp.status_code)
+                        await asyncio.sleep(RETRY_BACKOFF_SECONDS[min(attempt, len(RETRY_BACKOFF_SECONDS) - 1)])
+                        continue
+                    raise GatewayError("redirect" if 300 <= resp.status_code < 400 else "http", resp.status_code)
+        except asyncio.CancelledError:
+            raise
+        raise last_error or GatewayError("transport")
+
+    def _json(self, resp):
+        try:
+            return resp.json()
+        except ValueError:
+            raise GatewayError("invalid_response", resp.status_code) from None
 
     async def health(self) -> dict[str, Any]:
-        try:
-            async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, trust_env=False) as client:
-                resp = await client.get(f"{self.base_url}/health", headers=self._headers())
-        except httpx.HTTPError as exc:
-            raise GatewayError(f"无法连接 gateway: {exc}") from exc
-        if resp.status_code == 401:
-            raise GatewayError("gateway 令牌不匹配")
-        if resp.status_code != 200:
-            raise GatewayError(f"gateway HTTP {resp.status_code}")
-        return resp.json()
+        return self._json(await self._request("GET", "/health", timeout=DEFAULT_TIMEOUT, retryable=True))
 
     async def tools(self) -> list[dict[str, Any]]:
-        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, trust_env=False) as client:
-            resp = await client.get(f"{self.base_url}/tools", headers=self._headers())
-            resp.raise_for_status()
-            return resp.json()
+        return self._json(await self._request("GET", "/tools", timeout=DEFAULT_TIMEOUT, retryable=True))
 
     async def command(self, name: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        try:
-            async with httpx.AsyncClient(timeout=COMMAND_TIMEOUT, trust_env=False) as client:
-                resp = await client.post(
-                    f"{self.base_url}/command/{name}", json=params or {}, headers=self._headers()
-                )
-        except httpx.HTTPError as exc:
-            raise GatewayError(f"gateway 调用失败: {exc}") from exc
-        if resp.status_code == 502:
-            raise GatewayError(resp.json().get("detail", "Altium 操作失败"))
-        if resp.status_code != 200:
-            raise GatewayError(f"gateway HTTP {resp.status_code}")
-        return resp.json()
+        if not name.replace("_", "").isalnum():
+            raise GatewayError("invalid_command")
+        return self._json(await self._request("POST", f"/command/{name}", payload=params or {}))
 
     async def live_summary(self) -> dict[str, Any]:
-        try:
-            async with httpx.AsyncClient(timeout=COMMAND_TIMEOUT, trust_env=False) as client:
-                resp = await client.get(f"{self.base_url}/live/summary", headers=self._headers())
-        except httpx.HTTPError as exc:
-            raise GatewayError(f"gateway 调用失败: {exc}") from exc
-        if resp.status_code != 200:
-            raise GatewayError(f"gateway HTTP {resp.status_code}")
-        return resp.json()
+        result = self._json(await self._request("GET", "/live/summary", retryable=True))
+        if not isinstance(result, dict):
+            raise GatewayError("invalid_response")
+        if result.get("errors"):
+            result["errors"] = ["gateway_partial_failure"]
+        return result
 
     async def screenshot(self) -> tuple[bytes, str]:
-        """返回 (图片字节, media_type)。"""
-        try:
-            async with httpx.AsyncClient(timeout=COMMAND_TIMEOUT, trust_env=False) as client:
-                resp = await client.get(f"{self.base_url}/screenshot", headers=self._headers())
-        except httpx.HTTPError as exc:
-            raise GatewayError(f"gateway 调用失败: {exc}") from exc
-        if resp.status_code != 200:
-            raise GatewayError(f"gateway HTTP {resp.status_code}")
+        resp = await self._request("GET", "/screenshot", retryable=True)
         return resp.content, resp.headers.get("content-type", "image/svg+xml")

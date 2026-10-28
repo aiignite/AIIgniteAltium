@@ -1,7 +1,7 @@
 import uuid  # noqa: F401
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import JSON, CheckConstraint, DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -10,7 +10,9 @@ from app.models.base import SoftDeleteMixin, TimestampMixin, UUIDPkMixin
 
 class Conversation(UUIDPkMixin, TimestampMixin, SoftDeleteMixin, Base):
     __tablename__ = "ai_conversations"
+    __table_args__ = (CheckConstraint("project_id IS NULL OR connection_id IS NULL", name="ck_conversation_source"),)
 
+    connection_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("alt_connections.id"), nullable=True)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("sys_users.id"), index=True, nullable=False)
     title: Mapped[str] = mapped_column(String(200), default="新对话", nullable=False)
     project_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("fls_projects.id"), nullable=True)

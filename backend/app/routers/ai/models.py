@@ -8,7 +8,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models.ai.ai_model import AIModelConfig
 from app.schemas import CamelModel
-from app.security import get_current_user
+from app.security import get_current_user, require_admin
+from app.services.system.credentials import encrypt_credential
+from app.services.system.outbound import display_base_url, validate_outbound_url
+from app.services.ai.orchestrator import default_base_url
 
 router = APIRouter(prefix="/ai/models", tags=["ai-models"])
 
@@ -19,16 +22,35 @@ class ModelIn(CamelModel):
     name: str = Field(min_length=1, max_length=100)
     provider: str
     base_url: str = ""
-    api_key: str = ""
+    api_key: str | None = None
     model_name: str = ""
     is_default: bool = False
     enabled: bool = True
     remark: str = ""
 
 
-class ModelOut(ModelIn):
+class ModelOut(CamelModel):
     id: str
+    name: str
+    provider: str
+    base_url: str
+    has_api_key: bool
+    model_name: str
+    is_default: bool
+    enabled: bool
+    remark: str
     created_at: str
+
+
+async def _values(body: ModelIn) -> dict:
+    if body.provider not in PROVIDERS:
+        raise HTTPException(400, "Unsupported provider")
+    values = body.model_dump(exclude={"api_key"})
+    if body.provider != "mock" or body.base_url:
+        values["base_url"] = await validate_outbound_url(body.base_url or default_base_url(body.provider))
+    if body.api_key is not None:
+        values["api_key"] = encrypt_credential(body.api_key)
+    return values
 
 
 def _out(cfg: AIModelConfig) -> ModelOut:
@@ -36,8 +58,8 @@ def _out(cfg: AIModelConfig) -> ModelOut:
         id=str(cfg.id),
         name=cfg.name,
         provider=cfg.provider,
-        base_url=cfg.base_url,
-        api_key=cfg.api_key,
+        base_url=display_base_url(cfg.base_url),
+        has_api_key=bool(cfg.api_key),
         model_name=cfg.model_name,
         is_default=cfg.is_default,
         enabled=cfg.enabled,
@@ -70,11 +92,11 @@ async def list_models(
 async def create_model(
     body: ModelIn,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(get_current_user),
+    _user=Depends(require_admin),
 ) -> ModelOut:
     if body.provider not in PROVIDERS:
         raise HTTPException(status_code=400, detail=f"provider 须为 {'/'.join(PROVIDERS)}")
-    cfg = AIModelConfig(**body.model_dump())
+    cfg = AIModelConfig(**await _values(body))
     if body.is_default:
         await _clear_default(db)
     db.add(cfg)
@@ -88,14 +110,14 @@ async def update_model(
     model_id: UUID,
     body: ModelIn,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(get_current_user),
+    _user=Depends(require_admin),
 ) -> ModelOut:
     cfg = await db.get(AIModelConfig, model_id)
     if cfg is None or cfg.is_deleted:
         raise HTTPException(status_code=404, detail="模型配置不存在")
     if body.provider not in PROVIDERS:
         raise HTTPException(status_code=400, detail=f"provider 须为 {'/'.join(PROVIDERS)}")
-    for key, value in body.model_dump().items():
+    for key, value in (await _values(body)).items():
         setattr(cfg, key, value)
     if body.is_default:
         await _clear_default(db, exclude_id=cfg.id)
@@ -108,7 +130,7 @@ async def update_model(
 async def delete_model(
     model_id: UUID,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(get_current_user),
+    _user=Depends(require_admin),
 ):
     cfg = await db.get(AIModelConfig, model_id)
     if cfg is None or cfg.is_deleted:

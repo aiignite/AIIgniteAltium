@@ -7,6 +7,7 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '');
   const base = env.VITE_BASE_PATH || '/';
   const apiPrefix = base === '/' ? '/api' : `${base.replace(/\/$/, '')}/api`;
+  const apiTarget = env.VITE_API_TARGET || 'http://localhost:3345';
 
   return {
     base,
@@ -15,7 +16,7 @@ export default defineConfig(({ mode }) => {
       host: '0.0.0.0',
       proxy: {
         [apiPrefix]: {
-          target: 'http://localhost:3345',
+          target: apiTarget,
           changeOrigin: true,
           timeout: 600_000,
           rewrite: (p) =>

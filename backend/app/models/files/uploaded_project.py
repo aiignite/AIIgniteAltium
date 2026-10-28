@@ -22,4 +22,6 @@ class UploadedProject(UUIDPkMixin, TimestampMixin, SoftDeleteMixin, Base):
     svg_manifest: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
     design_json_path: Mapped[str] = mapped_column(String(500), default="", nullable=False)
     parse_duration_ms: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # 当前快照版本（0 表示尚未解析成功）；历史版本存于 fls_snapshots
+    current_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     remark: Mapped[str] = mapped_column(String(500), default="", nullable=False)

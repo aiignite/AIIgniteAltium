@@ -5,7 +5,7 @@ import { useAuth } from '../contexts/AuthContext'
 export function LoginPage() {
   const { login, register } = useAuth()
   const [tab, setTab] = useState<'login' | 'register'>('login')
-  const [email, setEmail] = useState('admin@example.com')
+  const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [displayName, setDisplayName] = useState('')
   const [busy, setBusy] = useState(false)
@@ -58,9 +58,6 @@ export function LoginPage() {
         <Button fullWidth loading={busy} onClick={submit}>
           {tab === 'login' ? '登录' : '注册并登录'}
         </Button>
-        <Text size="xs" c="dimmed" ta="center" mt="md">
-          开发环境默认管理员 admin@example.com / admin123456
-        </Text>
       </Card>
     </Center>
   )

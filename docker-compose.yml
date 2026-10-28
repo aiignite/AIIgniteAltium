@@ -24,9 +24,11 @@ services:
     build: ./backend
     environment:
       DATABASE_URL: postgresql+asyncpg://aidrive:aidrive_altium_dev@postgres:5432/aidrive_altium
-      SECRET_KEY: change-me-in-production
+      SECRET_KEY: ${SECRET_KEY:?set an independent random SECRET_KEY}
       ADMIN_EMAIL: admin@example.com
-      ADMIN_PASSWORD: admin123456
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set a non-default ADMIN_PASSWORD}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-}
+      OUTBOUND_ALLOWED_URLS: '${OUTBOUND_ALLOWED_URLS:-["https://api.openai.com/v1","https://api.anthropic.com"]}'
       DATA_DIR: /data
     volumes:
       - app_data:/data

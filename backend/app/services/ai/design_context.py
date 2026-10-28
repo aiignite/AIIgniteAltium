@@ -81,8 +81,8 @@ def build_design_context(snapshot: dict[str, Any], max_components: int = 25, max
         )
         rect = b.get("outlineRectMils")
         if rect and len(rect) == 4:
-            w = (rect[2] - rect[0]) / 1000.0
-            h = (rect[3] - rect[1]) / 1000.0
+            w = rect[2] - rect[0]
+            h = rect[3] - rect[1]
             lines.append(f"  板框: {w:.1f} x {h:.1f} mil")
 
     bom = snapshot.get("bom") or []

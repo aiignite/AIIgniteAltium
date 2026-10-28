@@ -1,1 +1,1 @@
-from .connection import GatewayConnection  # noqa: F401
+from .connection import ConnectionGrant, GatewayConnection  # noqa: F401

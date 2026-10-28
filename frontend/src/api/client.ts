@@ -91,13 +91,18 @@ export interface ChatStreamEvent {
   durationMs?: number
 }
 
-export async function streamChat(body: Record<string, unknown>, onEvent: (e: ChatStreamEvent) => void) {
+export async function streamChat(
+  body: Record<string, unknown>,
+  onEvent: (e: ChatStreamEvent) => void,
+  signal?: AbortSignal,
+) {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (token) headers['Authorization'] = `Bearer ${token}`
   const resp = await fetch(`${BASE}/ai/chat/stream`, {
     method: 'POST',
     headers,
     body: JSON.stringify(body),
+    signal,
   })
   if (!resp.ok || !resp.body) {
     let detail = `HTTP ${resp.status}`

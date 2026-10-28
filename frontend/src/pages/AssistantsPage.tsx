@@ -31,6 +31,7 @@ import {
 import { api } from '../api/client'
 import { AVATAR_OPTIONS, AvatarIcon } from '../components/ai/avatarIcons'
 import { AssistantAvatar } from '../components/ai/AssistantAvatar'
+import { useAuth } from '../contexts/AuthContext'
 
 interface AssistantItem {
   id: string
@@ -95,6 +96,8 @@ const emptySkill = {
 }
 
 export function AssistantsPage() {
+  const { user } = useAuth()
+  const isAdmin = user?.isAdmin ?? false
   const [assistants, setAssistants] = useState<AssistantItem[]>([])
   const [skills, setSkills] = useState<SkillItem[]>([])
   const [models, setModels] = useState<AIModelItem[]>([])
@@ -201,17 +204,19 @@ export function AssistantsPage() {
                   </Badge>
                 </Group>
               </Box>
-              <Button
-                leftSection={<IconPlus size={16} />}
-                onClick={() => {
-                  setError('')
-                  setAssistantForm({ ...emptyAssistant })
-                }}
-                className="ai-gradient-emerald"
-                style={{ border: 0 }}
-              >
-                新建助手
-              </Button>
+              {isAdmin && (
+                <Button
+                  leftSection={<IconPlus size={16} />}
+                  onClick={() => {
+                    setError('')
+                    setAssistantForm({ ...emptyAssistant })
+                  }}
+                  className="ai-gradient-emerald"
+                  style={{ border: 0 }}
+                >
+                  新建助手
+                </Button>
+              )}
             </Group>
           </Paper>
 
@@ -269,62 +274,67 @@ export function AssistantsPage() {
                   </Group>
                 )}
 
-                <Group justify="flex-end" gap="xs" mt="sm">
-                  {!a.isDefault && (
-                    <Tooltip label="设为默认">
+                {isAdmin && (
+                  <Group justify="flex-end" gap="xs" mt="sm">
+                    {!a.isDefault && (
+                      <Tooltip label="设为默认">
+                        <Button
+                          size="compact-xs"
+                          variant="light"
+                          color="yellow"
+                          aria-label="设为默认"
+                          onClick={async () => {
+                            await api.post(`/ai/assistants/${a.id}/default`)
+                            load()
+                          }}
+                        >
+                          <IconStarFilled size={11} />
+                        </Button>
+                      </Tooltip>
+                    )}
+                    <Tooltip label={a.isSystem ? '系统助手可编辑' : '编辑'}>
                       <Button
                         size="compact-xs"
                         variant="light"
-                        color="yellow"
-                        onClick={async () => {
-                          await api.post(`/ai/assistants/${a.id}/default`)
-                          load()
+                        color="blue"
+                        aria-label="编辑助手"
+                        onClick={() => {
+                          setError('')
+                          setAssistantForm({
+                            id: a.id,
+                            name: a.name,
+                            description: a.description,
+                            avatar: a.avatar,
+                            category: a.category,
+                            systemPrompt: a.systemPrompt,
+                            skillCodes: a.skillCodes,
+                            modelConfigId: a.modelConfigId,
+                            isDefault: a.isDefault,
+                            enabled: a.enabled,
+                          })
                         }}
                       >
-                        <IconStarFilled size={11} />
+                        <IconPencil size={11} />
                       </Button>
                     </Tooltip>
-                  )}
-                  <Tooltip label={a.isSystem ? '系统助手可编辑' : '编辑'}>
-                    <Button
-                      size="compact-xs"
-                      variant="light"
-                      color="blue"
-                      onClick={() => {
-                        setError('')
-                        setAssistantForm({
-                          id: a.id,
-                          name: a.name,
-                          description: a.description,
-                          avatar: a.avatar,
-                          category: a.category,
-                          systemPrompt: a.systemPrompt,
-                          skillCodes: a.skillCodes,
-                          modelConfigId: a.modelConfigId,
-                          isDefault: a.isDefault,
-                          enabled: a.enabled,
-                        })
-                      }}
-                    >
-                      <IconPencil size={11} />
-                    </Button>
-                  </Tooltip>
-                  {!a.isSystem && (
-                    <Tooltip label="删除">
-                      <Button
-                        size="compact-xs"
-                        variant="light"
-                        color="red"
-                        onClick={async () => {
-                          await api.delete(`/ai/assistants/${a.id}`)
-                          load()
-                        }}
-                      >
-                        <IconTrash size={11} />
-                      </Button>
-                    </Tooltip>
-                  )}
-                </Group>
+                    {!a.isSystem && (
+                      <Tooltip label="删除">
+                        <Button
+                          size="compact-xs"
+                          variant="light"
+                          color="red"
+                          aria-label="删除助手"
+                          onClick={async () => {
+                            await api.delete(`/ai/assistants/${a.id}`)
+                            load()
+                          }}
+                        >
+                          <IconTrash size={11} />
+                        </Button>
+                      </Tooltip>
+                    )}
+                  </Group>
+                )}
               </Paper>
             ))}
           </SimpleGrid>
@@ -355,17 +365,19 @@ export function AssistantsPage() {
                   技能是可复用的任务级提示词模板。对话时按输入内容自动匹配激活，也可在助手技能候选条中手动选用。
                 </Text>
               </Box>
-              <Button
-                leftSection={<IconPlus size={16} />}
-                onClick={() => {
-                  setError('')
-                  setSkillForm({ ...emptySkill })
-                }}
-                className="ai-gradient"
-                style={{ border: 0 }}
-              >
-                新建技能
-              </Button>
+              {isAdmin && (
+                <Button
+                  leftSection={<IconPlus size={16} />}
+                  onClick={() => {
+                    setError('')
+                    setSkillForm({ ...emptySkill })
+                  }}
+                  className="ai-gradient"
+                  style={{ border: 0 }}
+                >
+                  新建技能
+                </Button>
+              )}
             </Group>
           </Paper>
 
@@ -428,51 +440,60 @@ export function AssistantsPage() {
                   )}
 
                   <Group justify="space-between" mt="sm">
-                    <Switch
-                      size="xs"
-                      label="启用"
-                      checked={s.enabled}
-                      onChange={async (e) => {
-                        await api.put(`/ai/skills/${s.id}`, { ...s, enabled: e.currentTarget.checked })
-                        load()
-                      }}
-                    />
-                    <Group gap={4}>
-                      <Button
-                        size="compact-xs"
-                        variant="light"
-                        color="blue"
-                        onClick={() => {
-                          setError('')
-                          setSkillForm({
-                            id: s.id,
-                            code: s.code,
-                            name: s.name,
-                            description: s.description,
-                            category: s.category,
-                            icon: s.icon,
-                            promptTemplate: s.promptTemplate,
-                            keywords: s.keywords,
-                            enabled: s.enabled,
-                          })
+                    {isAdmin ? (
+                      <Switch
+                        size="xs"
+                        label="启用"
+                        checked={s.enabled}
+                        onChange={async (e) => {
+                          await api.put(`/ai/skills/${s.id}`, { ...s, enabled: e.currentTarget.checked })
+                          load()
                         }}
-                      >
-                        <IconPencil size={11} />
-                      </Button>
-                      {!s.isSystem && (
+                      />
+                    ) : (
+                      <Badge size="sm" variant="light" color={s.enabled ? 'green' : 'gray'}>
+                        {s.enabled ? '启用' : '停用'}
+                      </Badge>
+                    )}
+                    {isAdmin && (
+                      <Group gap={4}>
                         <Button
                           size="compact-xs"
                           variant="light"
-                          color="red"
-                          onClick={async () => {
-                            await api.delete(`/ai/skills/${s.id}`)
-                            load()
+                          color="blue"
+                          aria-label="编辑技能"
+                          onClick={() => {
+                            setError('')
+                            setSkillForm({
+                              id: s.id,
+                              code: s.code,
+                              name: s.name,
+                              description: s.description,
+                              category: s.category,
+                              icon: s.icon,
+                              promptTemplate: s.promptTemplate,
+                              keywords: s.keywords,
+                              enabled: s.enabled,
+                            })
                           }}
                         >
-                          <IconTrash size={11} />
+                          <IconPencil size={11} />
                         </Button>
-                      )}
-                    </Group>
+                        {!s.isSystem && (
+                          <Button
+                            size="compact-xs"
+                            variant="light"
+                            color="red"
+                            onClick={async () => {
+                              await api.delete(`/ai/skills/${s.id}`)
+                              load()
+                            }}
+                          >
+                            <IconTrash size={11} />
+                          </Button>
+                        )}
+                      </Group>
+                    )}
                   </Group>
                 </Paper>
               )

@@ -10,8 +10,18 @@ import logging
 from collections.abc import AsyncGenerator
 
 import httpx
+from uuid import uuid4
+
+from app.services.system.credentials import decrypt_credential
+from app.services.system.outbound import validate_outbound_url
 
 logger = logging.getLogger(__name__)
+
+
+class ProviderError(RuntimeError):
+    def __init__(self, category: str, status: int | None = None):
+        self.category, self.status, self.request_id = category, status, uuid4().hex
+        super().__init__(f"provider_{category}; status={status or 'none'}; requestId={self.request_id}")
 
 DEFAULT_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0)
 
@@ -22,14 +32,15 @@ async def stream_openai_compatible(
     model: str,
     messages: list[dict],
 ) -> AsyncGenerator[str, None]:
-    url = f"{base_url.rstrip('/')}/chat/completions"
+    base_url = await validate_outbound_url(base_url)
+    api_key = decrypt_credential(api_key)
+    url = f"{base_url}/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     payload = {"model": model, "messages": messages, "stream": True}
-    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, follow_redirects=False) as client:
         async with client.stream("POST", url, json=payload, headers=headers) as resp:
-            if resp.status_code >= 400:
-                body = (await resp.aread()).decode(errors="replace")[:500]
-                raise RuntimeError(f"provider HTTP {resp.status_code}: {body}")
+            if resp.status_code >= 300:
+                raise ProviderError("redirect" if resp.status_code < 400 else "http", resp.status_code)
             async for line in resp.aiter_lines():
                 if not line.startswith("data:"):
                     continue
@@ -52,7 +63,9 @@ async def stream_anthropic(
     messages: list[dict],
     system: str,
 ) -> AsyncGenerator[str, None]:
-    url = f"{base_url.rstrip('/')}/v1/messages"
+    base_url = await validate_outbound_url(base_url)
+    api_key = decrypt_credential(api_key)
+    url = f"{base_url}/v1/messages"
     payload = {
         "model": model,
         "max_tokens": 4096,
@@ -62,11 +75,10 @@ async def stream_anthropic(
     if system:
         payload["system"] = system
     headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01"}
-    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, follow_redirects=False) as client:
         async with client.stream("POST", url, json=payload, headers=headers) as resp:
-            if resp.status_code >= 400:
-                body = (await resp.aread()).decode(errors="replace")[:500]
-                raise RuntimeError(f"provider HTTP {resp.status_code}: {body}")
+            if resp.status_code >= 300:
+                raise ProviderError("redirect" if resp.status_code < 400 else "http", resp.status_code)
             async for line in resp.aiter_lines():
                 if not line.startswith("data:"):
                     continue
@@ -130,14 +142,22 @@ async def stream_chat(
     messages: list[dict],
     system: str = "",
 ) -> AsyncGenerator[str, None]:
-    if provider == "mock":
-        async for chunk in stream_mock(base_url, api_key, model, messages):
+    system = system or "\n\n".join(m["content"] for m in messages if m["role"] == "system")
+    messages = [m for m in messages if m["role"] != "system"]
+    if system:
+        messages = [{"role": "system", "content": system}, *messages]
+    try:
+        if provider == "mock":
+            stream = stream_mock(base_url, "", model, messages)
+        elif provider == "openai":
+            stream = stream_openai_compatible(base_url, api_key, model, messages)
+        elif provider == "anthropic":
+            stream = stream_anthropic(base_url, api_key, model, messages, system)
+        else:
+            raise ProviderError("unsupported")
+        async for chunk in stream:
             yield chunk
-    elif provider == "openai":
-        async for chunk in stream_openai_compatible(base_url, api_key, model, messages):
-            yield chunk
-    elif provider == "anthropic":
-        async for chunk in stream_anthropic(base_url, api_key, model, messages, system):
-            yield chunk
-    else:
-        raise RuntimeError(f"未知 provider: {provider}")
+    except httpx.HTTPError:
+        raise ProviderError("transport") from None
+    except (ValueError, TypeError, KeyError, AttributeError):
+        raise ProviderError("invalid_response") from None

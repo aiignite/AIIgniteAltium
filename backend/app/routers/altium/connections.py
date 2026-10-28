@@ -1,37 +1,38 @@
-"""Altium 实时连接：配置 CRUD + 连接测试 + 实时摘要 + 截图代理。
-
-gateway 部署在局域网 Windows 机（已装 Altium）上，本路由经 REST 调用。
-"""
-
-import logging
 from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from pydantic import Field
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models.altium.connection import GatewayConnection
+from app.models.altium.connection import ConnectionGrant, GatewayConnection
+from app.models.system.user import User
 from app.schemas import CamelModel
-from app.security import get_current_user
+from app.security import get_current_user, require_admin
+from app.services.altium.access import get_accessible_connection, visible_connections
 from app.services.altium.gateway_client import GatewayClient, GatewayError
+from app.services.system.credentials import encrypt_credential
+from app.services.system.outbound import display_base_url, validate_outbound_url
 
-logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/altium/connections", tags=["altium"])
 
 
 class ConnectionIn(CamelModel):
     name: str = Field(min_length=1, max_length=100)
-    base_url: str = "http://192.168.1.14:3296"
-    api_token: str = ""
-    remark: str = ""
+    base_url: str = Field(max_length=500)
+    api_token: str | None = None
+    remark: str = Field(default="", max_length=500)
 
 
-class ConnectionOut(ConnectionIn):
+class ConnectionOut(CamelModel):
     id: str
+    name: str
+    base_url: str
+    has_token: bool
+    remark: str
     status: str
     last_error: str
     info: dict = {}
@@ -39,141 +40,119 @@ class ConnectionOut(ConnectionIn):
     created_at: str
 
 
+class GrantsIn(CamelModel):
+    user_ids: list[UUID]
+
+
+class GrantsOut(GrantsIn):
+    connection_id: UUID
+
+
 def _out(c: GatewayConnection) -> ConnectionOut:
     return ConnectionOut(
-        id=str(c.id),
-        name=c.name,
-        base_url=c.base_url,
-        api_token=c.api_token,
-        status=c.status,
-        last_error=c.last_error,
-        info=c.info or {},
+        id=str(c.id), name=c.name, base_url=display_base_url(c.base_url), has_token=bool(c.api_token),
+        status=c.status, last_error="gateway_unavailable" if c.last_error else "",
+        info=({"mode": "mock" if c.info.get("mode") == "mock" else "live",
+               "altiumOnline": bool(c.info.get("altiumOnline"))} if isinstance(c.info, dict) and c.info else {}),
         last_checked_at=c.last_checked_at.isoformat() if c.last_checked_at else None,
-        remark=c.remark,
-        created_at=c.created_at.isoformat(),
+        remark=c.remark, created_at=c.created_at.isoformat(),
     )
 
 
-async def _get_connection(db: AsyncSession, connection_id: UUID) -> GatewayConnection:
-    conn = await db.get(GatewayConnection, connection_id)
-    if conn is None or conn.is_deleted:
-        raise HTTPException(status_code=404, detail="连接不存在")
-    return conn
-
-
-def _client(conn: GatewayConnection) -> GatewayClient:
-    return GatewayClient(conn.base_url, conn.api_token)
+async def _values(body: ConnectionIn) -> dict:
+    values = body.model_dump(exclude={"api_token"})
+    values["base_url"] = await validate_outbound_url(body.base_url)
+    if body.api_token is not None:
+        values["api_token"] = encrypt_credential(body.api_token)
+    return values
 
 
 @router.get("", response_model=list[ConnectionOut])
-async def list_connections(
-    db: AsyncSession = Depends(get_db),
-    _user=Depends(get_current_user),
-) -> list[ConnectionOut]:
-    result = await db.execute(
-        select(GatewayConnection)
-        .where(GatewayConnection.is_deleted.is_(False))
-        .order_by(GatewayConnection.created_at)
-    )
-    return [_out(c) for c in result.scalars()]
+async def list_connections(db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
+    connections = (await db.execute(visible_connections(user).order_by(GatewayConnection.created_at))).scalars()
+    return [_out(c) for c in connections]
 
 
 @router.post("", response_model=ConnectionOut)
-async def create_connection(
-    body: ConnectionIn,
-    db: AsyncSession = Depends(get_db),
-    _user=Depends(get_current_user),
-) -> ConnectionOut:
-    conn = GatewayConnection(**body.model_dump(), status="unreachable")
+async def create_connection(body: ConnectionIn, db: AsyncSession = Depends(get_db), user=Depends(require_admin)):
+    conn = GatewayConnection(**await _values(body), status="unreachable")
     db.add(conn)
     await db.commit()
     await db.refresh(conn)
     return _out(conn)
 
 
+@router.put("/{connection_id}", response_model=ConnectionOut)
+async def update_connection(connection_id: UUID, body: ConnectionIn, db: AsyncSession = Depends(get_db), user=Depends(require_admin)):
+    conn = await get_accessible_connection(db, connection_id, user.id)
+    for key, value in (await _values(body)).items():
+        setattr(conn, key, value)
+    conn.status, conn.last_error, conn.info, conn.last_checked_at = "unreachable", "", {}, None
+    await db.commit()
+    await db.refresh(conn)
+    return _out(conn)
+
+
+@router.get("/{connection_id}/grants", response_model=GrantsOut)
+async def get_grants(connection_id: UUID, db: AsyncSession = Depends(get_db), user=Depends(require_admin)):
+    await get_accessible_connection(db, connection_id, user.id)
+    ids = (await db.execute(select(ConnectionGrant.user_id).where(ConnectionGrant.connection_id == connection_id).order_by(ConnectionGrant.user_id))).scalars().all()
+    return GrantsOut(connection_id=connection_id, user_ids=ids)
+
+
+@router.put("/{connection_id}/grants", response_model=GrantsOut)
+async def replace_grants(connection_id: UUID, body: GrantsIn, db: AsyncSession = Depends(get_db), user=Depends(require_admin)):
+    await get_accessible_connection(db, connection_id, user.id)
+    await db.execute(select(GatewayConnection).where(GatewayConnection.id == connection_id).with_for_update())
+    ids = set(body.user_ids)
+    valid = set((await db.execute(select(User.id).where(User.id.in_(ids), User.is_active.is_(True), User.is_deleted.is_(False)))).scalars())
+    if ids != valid:
+        raise HTTPException(400, "userIds must identify active users")
+    await db.execute(delete(ConnectionGrant).where(ConnectionGrant.connection_id == connection_id))
+    db.add_all([ConnectionGrant(connection_id=connection_id, user_id=uid) for uid in ids])
+    await db.commit()
+    return GrantsOut(connection_id=connection_id, user_ids=sorted(ids))
+
+
 @router.post("/{connection_id}/test", response_model=ConnectionOut)
-async def test_connection(
-    connection_id: UUID,
-    db: AsyncSession = Depends(get_db),
-    _user=Depends(get_current_user),
-) -> ConnectionOut:
-    conn = await _get_connection(db, connection_id)
-    client = _client(conn)
+async def test_connection(connection_id: UUID, db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
+    conn = await get_accessible_connection(db, connection_id, user.id)
     conn.last_checked_at = datetime.now(timezone.utc)
     try:
-        health = await client.health()
+        health = await GatewayClient(conn.base_url, conn.api_token).health()
         conn.status = "connected" if health.get("altiumOnline") else "unreachable"
-        conn.info = {
-            "mode": health.get("mode"),
-            "altiumOnline": health.get("altiumOnline"),
-            "commands": health.get("commands"),
-            "bridgeDir": health.get("bridgeDir"),
-        }
-        if not health.get("altiumOnline"):
-            conn.last_error = "gateway 在线但 Altium 桥未就绪（检查 AIDriveBridge 脚本是否运行）"
-        else:
-            conn.last_error = ""
-    except GatewayError as exc:
-        conn.status = "unreachable"
-        conn.last_error = str(exc)[:1000]
-        conn.info = {}
+        conn.info = {"mode": "mock" if health.get("mode") == "mock" else "live", "altiumOnline": bool(health.get("altiumOnline"))}
+        conn.last_error = "" if health.get("altiumOnline") else "gateway_unavailable"
+    except GatewayError:
+        conn.status, conn.last_error, conn.info = "unreachable", "gateway_unavailable", {}
     await db.commit()
     await db.refresh(conn)
     return _out(conn)
 
 
 @router.get("/{connection_id}/live/summary")
-async def live_summary(
-    connection_id: UUID,
-    db: AsyncSession = Depends(get_db),
-    _user=Depends(get_current_user),
-) -> dict:
-    conn = await _get_connection(db, connection_id)
+async def live_summary(connection_id: UUID, db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
+    conn = await get_accessible_connection(db, connection_id, user.id)
     try:
-        return await _client(conn).live_summary()
+        return await GatewayClient(conn.base_url, conn.api_token).live_summary()
     except GatewayError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+        raise HTTPException(502, str(exc)) from None
 
 
 @router.get("/{connection_id}/screenshot")
-async def screenshot(
-    connection_id: UUID,
-    db: AsyncSession = Depends(get_db),
-    _user=Depends(get_current_user),
-) -> Response:
-    conn = await _get_connection(db, connection_id)
+async def screenshot(connection_id: UUID, db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
+    conn = await get_accessible_connection(db, connection_id, user.id)
     try:
-        content, media_type = await _client(conn).screenshot()
+        content, media_type = await GatewayClient(conn.base_url, conn.api_token).screenshot()
     except GatewayError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+        raise HTTPException(502, str(exc)) from None
     return Response(content=content, media_type=media_type)
 
 
-@router.get("/first-connected")
-async def first_connected(
-    db: AsyncSession = Depends(get_db),
-    _user=Depends(get_current_user),
-) -> dict:
-    """供对话实时上下文使用：返回第一条 connected 连接，无则 {connected: false}。"""
-    result = await db.execute(
-        select(GatewayConnection)
-        .where(GatewayConnection.status == "connected", GatewayConnection.is_deleted.is_(False))
-        .order_by(GatewayConnection.created_at)
-        .limit(1)
-    )
-    conn = result.scalars().first()
-    if conn is None:
-        return {"connected": False}
-    return {"connected": True, "id": str(conn.id), "baseUrl": conn.base_url, "token": conn.api_token}
-
-
 @router.delete("/{connection_id}")
-async def delete_connection(
-    connection_id: UUID,
-    db: AsyncSession = Depends(get_db),
-    _user=Depends(get_current_user),
-):
-    conn = await _get_connection(db, connection_id)
+async def delete_connection(connection_id: UUID, db: AsyncSession = Depends(get_db), user=Depends(require_admin)):
+    conn = await get_accessible_connection(db, connection_id, user.id)
     conn.is_deleted = True
+    await db.execute(delete(ConnectionGrant).where(ConnectionGrant.connection_id == connection_id))
     await db.commit()
     return {"ok": True}

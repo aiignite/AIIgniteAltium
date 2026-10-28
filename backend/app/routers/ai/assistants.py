@@ -9,7 +9,7 @@ from app.database import get_db
 from app.models.ai.assistant import AIAssistant
 from app.models.ai.ai_model import AIModelConfig
 from app.schemas import CamelModel
-from app.security import get_current_user
+from app.security import get_current_user, require_admin
 
 router = APIRouter(prefix="/ai/assistants", tags=["ai-assistants"])
 
@@ -97,7 +97,7 @@ async def list_assistants(
 async def create_assistant(
     body: AssistantIn,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(get_current_user),
+    _user=Depends(require_admin),
 ) -> AssistantOut:
     assistant = AIAssistant(is_system=False, sort_order=100, **body.model_dump())
     if body.is_default:
@@ -113,7 +113,7 @@ async def update_assistant(
     assistant_id: UUID,
     body: AssistantIn,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(get_current_user),
+    _user=Depends(require_admin),
 ) -> AssistantOut:
     assistant = await db.get(AIAssistant, assistant_id)
     if assistant is None or assistant.is_deleted:
@@ -135,7 +135,7 @@ async def update_assistant(
 async def set_default_assistant(
     assistant_id: UUID,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(get_current_user),
+    _user=Depends(require_admin),
 ):
     assistant = await db.get(AIAssistant, assistant_id)
     if assistant is None or assistant.is_deleted:
@@ -150,7 +150,7 @@ async def set_default_assistant(
 async def delete_assistant(
     assistant_id: UUID,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(get_current_user),
+    _user=Depends(require_admin),
 ):
     assistant = await db.get(AIAssistant, assistant_id)
     if assistant is None or assistant.is_deleted:

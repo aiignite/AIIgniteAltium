@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models.ai.assistant import AIAssistant, AISkill
 from app.schemas import CamelModel
-from app.security import get_current_user
+from app.security import get_current_user, require_admin
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/ai/skills", tags=["ai-skills"])
@@ -103,7 +103,7 @@ async def list_skills(
 async def create_skill(
     body: SkillIn,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(get_current_user),
+    _user=Depends(require_admin),
 ) -> SkillOut:
     exists = (
         await db.execute(select(AISkill).where(AISkill.code == body.code, AISkill.is_deleted.is_(False)))
@@ -122,7 +122,7 @@ async def update_skill(
     skill_id: UUID,
     body: SkillIn,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(get_current_user),
+    _user=Depends(require_admin),
 ) -> SkillOut:
     skill = await db.get(AISkill, skill_id)
     if skill is None or skill.is_deleted:
@@ -147,7 +147,7 @@ async def update_skill(
 async def delete_skill(
     skill_id: UUID,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(get_current_user),
+    _user=Depends(require_admin),
 ):
     skill = await db.get(AISkill, skill_id)
     if skill is None or skill.is_deleted:

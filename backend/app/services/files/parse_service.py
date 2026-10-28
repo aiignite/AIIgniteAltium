@@ -4,13 +4,17 @@ import asyncio
 import logging
 import shutil
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.models.files.parse_job import ParseJob
+from app.models.files.snapshot_version import SnapshotVersion
 from app.models.files.uploaded_project import UploadedProject
 from app.services.files.worker_client import run_parse
 
@@ -67,53 +71,97 @@ def _try_direct_snapshot(files: list[tuple[str, bytes]]) -> dict[str, Any] | Non
     return None
 
 
-async def parse_project(project_id: UUID) -> None:
-    """BackgroundTask 入口：自管 session（请求 session 已关闭）。"""
-    from app.database import async_session_maker
+async def run_parse_job(db: AsyncSession, job_id: UUID) -> None:
+    """执行已领取（running）的解析任务，结果与快照版本在同一事务内落库。"""
+    job = await db.get(ParseJob, job_id)
+    if job is None or job.status != "running":
+        return
+    project = await db.get(UploadedProject, job.project_id)
+    if project is None:
+        job.status = "failed"
+        job.error = "工程不存在"
+        job.finished_at = datetime.now(timezone.utc)
+        await db.commit()
+        return
+    project_id = project.id
+    storage_dir = Path(project.storage_dir)
+    project_name = project.name
+    # 解析可能耗时数分钟，先释放事务，避免长期占用连接
+    await db.commit()
 
-    async with async_session_maker() as db:
-        project = await db.get(UploadedProject, project_id)
-        if project is None:
+    started = time.time()
+    try:
+        files = await asyncio.to_thread(_read_dir_files, storage_dir)
+        direct = await asyncio.to_thread(_try_direct_snapshot, files)
+        if direct is not None:
+            result = {"ok": True, "snapshot": direct, "svgManifest": [], "designJsonFile": ""}
+        elif not storage_dir.exists():
+            result = {"ok": False, "error": "工程文件不存在，无法解析"}
+        else:
+            result = await asyncio.to_thread(
+                run_parse,
+                storage_dir,
+                project_render_dir(project_id),
+                render_svg=True,
+                project_name=project_name,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("parse job %s failed", job_id)
+        result = {"ok": False, "error": str(exc)[:4000]}
+    await _persist_result(db, job_id, project_id, result, int((time.time() - started) * 1000))
+
+
+async def _persist_result(db: AsyncSession, job_id: UUID, project_id: UUID, result: dict[str, Any], duration: int) -> None:
+    async with db.begin():
+        job = await db.scalar(select(ParseJob).where(ParseJob.id == job_id).with_for_update())
+        if job is None:
             return
-        project.status = "parsing"
-        await db.commit()
-        started = time.time()
-        try:
-            direct = _try_direct_snapshot(_read_upload_files(project))
-            if direct is not None:
-                result = {"ok": True, "snapshot": direct, "svgManifest": [], "designJsonFile": ""}
-            else:
-                result = await asyncio.to_thread(
-                    run_parse,
-                    Path(project.storage_dir),
-                    project_render_dir(project.id),
-                    render_svg=True,
-                    project_name=project.name,
-                )
-            duration = int((time.time() - started) * 1000)
-            if not result.get("ok"):
-                project.status = "failed"
-                project.error = result.get("error", "未知解析错误")[:4000]
-            else:
-                project.status = "ready"
-                project.error = ""
-                project.snapshot = result["snapshot"]
-                project.svg_manifest = result.get("svgManifest", [])
-                design_json_file = result.get("designJsonFile") or ""
-                project.design_json_path = (
-                    str(project_render_dir(project.id) / design_json_file) if design_json_file else ""
-                )
-            project.parse_duration_ms = duration
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("parse_project failed")
+        project = await db.scalar(
+            select(UploadedProject)
+            .where(UploadedProject.id == project_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        job.finished_at = datetime.now(timezone.utc)
+        job.error = ""
+        if project is None or project.is_deleted:
+            job.status = "failed"
+            job.error = "工程不存在或已删除"
+            return
+        project.parse_duration_ms = duration
+        if not result.get("ok"):
+            message = str(result.get("error") or "未知解析错误")[:4000]
+            job.status = "failed"
+            job.error = message
             project.status = "failed"
-            project.error = str(exc)[:4000]
-        await db.commit()
+            project.error = message
+            return
+        snapshot = result["snapshot"]
+        svg_manifest = result.get("svgManifest") or []
+        design_json_file = result.get("designJsonFile") or ""
+        design_json_path = str(project_render_dir(project.id) / design_json_file) if design_json_file else ""
+        version = (project.current_version or 0) + 1
+        db.add(
+            SnapshotVersion(
+                project_id=project.id,
+                version=version,
+                snapshot=snapshot,
+                svg_manifest=svg_manifest,
+                design_json_path=design_json_path,
+                parse_duration_ms=duration,
+            )
+        )
+        project.snapshot = snapshot
+        project.svg_manifest = svg_manifest
+        project.design_json_path = design_json_path
+        project.current_version = version
+        project.status = "ready"
+        project.error = ""
+        job.status = "succeeded"
 
 
-def _read_upload_files(project: UploadedProject) -> list[tuple[str, bytes]]:
+def _read_dir_files(root: Path) -> list[tuple[str, bytes]]:
     out: list[tuple[str, bytes]] = []
-    root = Path(project.storage_dir)
     if not root.exists():
         return out
     for path in sorted(root.iterdir()):

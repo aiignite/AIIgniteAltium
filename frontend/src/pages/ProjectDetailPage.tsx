@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react'
-import { useParams } from 'react-router-dom'
-import { Badge, Card, Group, Loader, SimpleGrid, Text } from '@mantine/core'
+import { useNavigate, useParams } from 'react-router-dom'
+import { Badge, Button, Card, Group, Loader, SimpleGrid, Text } from '@mantine/core'
+import { IconRefresh, IconSparkles } from '@tabler/icons-react'
 import { api } from '../api/client'
 import { DesignDataTabs } from '../components/DesignDataTabs'
+import { ReviewPanel } from '../components/ReviewPanel'
 
 export interface ProjectDetail extends ProjectSummaryLike {
   snapshot: Snapshot
@@ -16,6 +18,7 @@ interface ProjectSummaryLike {
   stats: Record<string, number>
   svgManifest: { svgId: string; kind: string; title: string; file: string }[]
   parseDurationMs: number
+  currentVersion: number
   createdAt: string
   updatedAt: string
 }
@@ -38,6 +41,9 @@ export function ProjectDetailPage() {
   const { projectId } = useParams()
   const [project, setProject] = useState<ProjectDetail | null>(null)
   const [loading, setLoading] = useState(true)
+  const [reparsing, setReparsing] = useState(false)
+  const [actionError, setActionError] = useState('')
+  const navigate = useNavigate()
 
   useEffect(() => {
     if (!projectId) return
@@ -59,6 +65,20 @@ export function ProjectDetailPage() {
       clearInterval(t)
     }
   }, [projectId])
+
+  const reparse = async () => {
+    if (!projectId || reparsing || project?.status === 'parsing') return
+    setReparsing(true)
+    setActionError('')
+    try {
+      await api.post(`/files/projects/${projectId}/reparse`)
+      setProject((prev) => (prev ? { ...prev, status: 'parsing' } : prev))
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : '重新解析失败')
+    } finally {
+      setReparsing(false)
+    }
+  }
 
   if (loading || !project)
     return (
@@ -86,11 +106,43 @@ export function ProjectDetailPage() {
           <Badge color={project.status === 'ready' ? 'green' : project.status === 'failed' ? 'red' : 'yellow'}>
             {project.status}
           </Badge>
+          {(project.currentVersion ?? 0) > 0 && (
+            <Badge color="gray" variant="light">
+              快照 v{project.currentVersion}
+            </Badge>
+          )}
         </Group>
-        <Text size="xs" c="dimmed">
-          {project.fileNames.join('、')} · 解析 {(project.parseDurationMs / 1000).toFixed(1)}s
-        </Text>
+        <Group gap="sm">
+          <Text size="xs" c="dimmed">
+            {project.fileNames.join('、')} · 解析 {(project.parseDurationMs / 1000).toFixed(1)}s
+          </Text>
+          <Button
+            size="xs"
+            variant="light"
+            leftSection={<IconRefresh size={14} />}
+            onClick={reparse}
+            loading={reparsing}
+            disabled={project.status === 'parsing'}
+          >
+            重新解析
+          </Button>
+          <Button
+            size="xs"
+            className="ai-gradient"
+            style={{ border: 0 }}
+            leftSection={<IconSparkles size={14} />}
+            onClick={() => navigate(`/?projectId=${project.id}`)}
+            disabled={project.status !== 'ready'}
+          >
+            用 AI 分析
+          </Button>
+        </Group>
       </Group>
+      {actionError && (
+        <Text c="red" size="sm" mb="md">
+          {actionError}
+        </Text>
+      )}
       {project.status === 'failed' && (
         <Text c="red" size="sm" mb="md">
           {project.error}
@@ -123,6 +175,7 @@ export function ProjectDetailPage() {
             </Text>
           )}
           <DesignDataTabs projectId={project.id} />
+          <ReviewPanel projectId={project.id} currentVersion={project.currentVersion ?? 0} />
         </>
       )}
     </>
