@@ -14,11 +14,11 @@ pytestmark = pytest.mark.integration
 PREFIX = "/api/v1"
 
 
-@pytest.mark.parametrize("resource,field,flag,model,column,body", [
-    ("ai/models", "apiKey", "hasApiKey", AIModelConfig, "api_key", {"name": "secret-model", "provider": "mock"}),
-    ("altium/connections", "apiToken", "hasToken", GatewayConnection, "api_token", {"name": "secret-gateway", "baseUrl": "http://127.0.0.1:3296"}),
+@pytest.mark.parametrize("resource,field,flag,model,column,body,clear_body,empty_token", [
+    ("ai/models", "apiKey", "hasKey", AIModelConfig, "api_key_enc", {"name": "secret-model", "provider": "mock"}, {"clearApiKey": True}, ""),
+    ("altium/connections", "apiToken", "hasToken", GatewayConnection, "api_token", {"name": "secret-gateway", "baseUrl": "http://127.0.0.1:3296"}, {"apiToken": ""}, None),
 ])
-async def test_secret_contract(api, actors, db, resource, field, flag, model, column, body, monkeypatch):
+async def test_secret_contract(api, actors, db, resource, field, flag, model, column, body, clear_body, empty_token, monkeypatch):
     path = PREFIX + "/" + resource
     admin = auth(actors["admin"])
     created = await api.post(path, json={**body, field: "original-secret"}, headers=admin)
@@ -28,7 +28,8 @@ async def test_secret_contract(api, actors, db, resource, field, flag, model, co
     encrypted = getattr(row, column)
     assert decrypt_credential(encrypted) == "original-secret" and encrypted.startswith("enc:v1:")
     item = path + "/" + str(item_id)
-    for payload in (body, {**body, field: None}):
+    untouched = [body, {**body, field: empty_token}]
+    for payload in untouched:
         response = await api.put(item, json=payload, headers=admin)
         assert response.status_code == 200 and response.json()[flag] is True
         await db.refresh(row)
@@ -46,7 +47,7 @@ async def test_secret_contract(api, actors, db, resource, field, flag, model, co
     monkeypatch.setattr(settings, "credential_encryption_key", "")
     failed = await api.put(item, json={**body, field: "failed-secret"}, headers=admin)
     assert failed.status_code == 503 and "failed-secret" not in failed.text
-    cleared = await api.put(item, json={**body, field: ""}, headers=admin)
+    cleared = await api.put(item, json={**body, **clear_body}, headers=admin)
     assert cleared.status_code == 200 and cleared.json()[flag] is False
     await db.refresh(row)
     assert getattr(row, column) == ""

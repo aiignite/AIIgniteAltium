@@ -133,10 +133,12 @@ async def test_provider_system_payload(provider, monkeypatch):
     options = mock_http(monkeypatch, handler)
     result = [v async for v in providers.stream_chat(provider, base_url="http://127.0.0.1:3296", api_key=encrypt_credential("mysecret"),
               model="test", messages=[{"role": "system", "content": "old"}, {"role": "user", "content": "hello"}], system="【设计上下文】\nrequired")]
-    assert result
+    text = "".join(v["text"] for v in result if v.get("type") == "delta")
+    assert text
     if provider == "mock":
-        assert not requests and "required" in "".join(result)
+        assert not requests and "required" in text
     else:
+        assert text == "ok"
         payload = json.loads(requests[0].content)
         if provider == "anthropic":
             assert payload["system"] == "【设计上下文】\nrequired"

@@ -1,6 +1,17 @@
 """技能与系统助手种子数据（对齐 AIIgnitePLM seed-sync 约定：幂等补种，不覆盖用户修改）。"""
 
+import logging
+
+from app.models.ai.ai_model import AIModelConfig
 from app.models.ai.assistant import AIAssistant, AISkill
+from app.services.ai.providers import PRESETS
+
+logger = logging.getLogger(__name__)
+
+# 首次安装时预置的模型模板（只建模板，不填 Key；云端模型未配 Key 会被路由自动跳过）
+SEED_MODEL_PRESET_IDS = ("openai-gpt-4o-mini", "deepseek-chat", "ollama-qwen")
+
+MOCK_MODEL_NAME = "演示引擎（无需 Key）"
 
 SEED_SKILLS: list[dict] = [
     {
@@ -18,6 +29,7 @@ SEED_SKILLS: list[dict] = [
             "4) 结论与建议。仅基于上下文数据，不要臆造。"
         ),
         "sort_order": 10,
+        "priority": 80,
     },
     {
         "code": "pcb-review",
@@ -35,6 +47,7 @@ SEED_SKILLS: list[dict] = [
             "4) 结论。"
         ),
         "sort_order": 20,
+        "priority": 70,
     },
     {
         "code": "requirement-analysis",
@@ -48,6 +61,7 @@ SEED_SKILLS: list[dict] = [
             "（不得编造具体型号参数，仅给方向）、接口与电源需求、风险与待确认问题。"
         ),
         "sort_order": 30,
+        "priority": 60,
     },
     {
         "code": "bom-analysis",
@@ -64,6 +78,7 @@ SEED_SKILLS: list[dict] = [
             "4) 输出风险物料清单与建议。"
         ),
         "sort_order": 40,
+        "priority": 55,
     },
 ]
 
@@ -136,3 +151,79 @@ async def seed_skills_and_assistants(db) -> None:
         payload = {k: v for k, v in spec.items() if k != "code"}
         db.add(AIAssistant(is_system=True, enabled=True, **payload))
     await db.commit()
+
+
+def _preset_to_model(preset: dict, sort_order: int) -> dict:
+    return {
+        "name": preset["name"],
+        "provider": preset["provider"],
+        "base_url": preset["baseUrl"],
+        "model_name": preset["modelName"],
+        "context_window": preset["contextWindow"],
+        "supports_tools": preset["supportsTools"],
+        "supports_image": False,
+        "speed": preset["speed"],
+        "cost": preset["cost"],
+        "is_system": True,
+        "enabled": True,
+        "sort_order": sort_order,
+        "remark": "预设模板：填入 API Key 并测试通过后即可使用",
+    }
+
+
+async def seed_models(db) -> None:
+    """幂等补种模型：内置 mock 兜底 + 首批预设模板（不填 Key，未配 Key 由路由自动跳过）。"""
+    from sqlalchemy import select
+
+    rows = list((await db.execute(select(AIModelConfig))).scalars())
+    existing_names = {r.name for r in rows}
+    has_default = any(not r.is_deleted and r.is_default for r in rows)
+
+    mock = next((r for r in rows if r.name == MOCK_MODEL_NAME), None)
+    if mock is None:
+        db.add(
+            AIModelConfig(
+                name=MOCK_MODEL_NAME,
+                provider="mock",
+                model_name="mock-1",
+                is_default=not has_default,
+                is_system=True,
+                supports_tools=True,
+                cost="local",
+                remark="内置确定性演示模型，配置真实 API Key 后可切换",
+                sort_order=0,
+            )
+        )
+        existing_names.add(MOCK_MODEL_NAME)
+    elif not mock.is_system:
+        mock.is_system = True
+
+    presets = {p["id"]: p for p in PRESETS}
+    for idx, preset_id in enumerate(SEED_MODEL_PRESET_IDS):
+        preset = presets.get(preset_id)
+        if preset is None or preset["name"] in existing_names:
+            continue
+        db.add(AIModelConfig(**_preset_to_model(preset, 10 + idx * 10)))
+        existing_names.add(preset["name"])
+    await db.commit()
+
+
+async def upgrade_legacy_api_keys(db) -> int:
+    """把历史明文 api_key 加密写入 api_key_enc 并清空明文（幂等）。"""
+    from sqlalchemy import select
+
+    result = await db.execute(select(AIModelConfig).where(AIModelConfig.api_key != ""))
+    count = 0
+    for cfg in result.scalars():
+        plain = cfg.api_key or ""
+        if not plain:
+            continue
+        if not cfg.api_key_enc:
+            cfg.bind_key(plain)
+        else:
+            cfg.api_key = ""
+        count += 1
+    if count:
+        await db.commit()
+        logger.info("已升级 %d 条模型密钥为加密存储", count)
+    return count

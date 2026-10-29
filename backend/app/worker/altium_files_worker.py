@@ -44,7 +44,11 @@ def _outline_rect_mils(outline: Any) -> tuple[float, float, float, float] | None
 
 
 def _safe_name(stem: str) -> str:
-    return "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in stem)[:60] or "doc"
+    # 生成仅含 ASCII 的文件名/标识：渲染 id 会被后端 /svgs/{id} 路由校验（[A-Za-z0-9_-]+）。
+    # 用 c.isascii() 显式限定，而不是 isalnum()：中文字符 isalnum() 为 True，
+    # 会导致生成非 ASCII 的 svg id，被 /svgs/{id} 路由以 HTTP 400 拒绝。
+    kept = "".join(c if (c.isascii() and (c.isalnum() or c in "-_")) else "_" for c in stem)[:60]
+    return kept or "doc"
 
 
 def find_or_create_prjpcb(project_dir: Path) -> tuple[Path, list[str], list[str]]:

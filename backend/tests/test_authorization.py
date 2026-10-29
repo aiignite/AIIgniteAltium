@@ -7,7 +7,7 @@ from sqlalchemy import func, select
 
 from app.models import AIModelConfig, AIAssistant, AISkill, Conversation, Message, UploadedProject
 from app.models.altium.connection import ConnectionGrant, GatewayConnection
-from app.services.ai import orchestrator
+from app.services.ai import llm_router, orchestrator
 from app.services.altium.gateway_client import GatewayClient
 from conftest import auth
 
@@ -168,12 +168,13 @@ async def test_no_implicit_connection_and_model_preflight(api, actors, db, monke
     await db.commit()
     for model_id in (None, str(actors["model"].id), str(uuid4())):
         response = await api.post(PREFIX + "/ai/chat/stream", headers=auth(actors["alice"]), json={"content": "hi", "modelConfigId": model_id})
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert "no_model" in response.text
     assert await db.scalar(select(func.count()).select_from(Conversation)) == before
     enabled = AIModelConfig(name="enabled", provider="mock", enabled=True)
     db.add(enabled)
     await db.commit()
-    assert (await orchestrator.resolve_model_config(db, None)).id == enabled.id
+    assert (await llm_router.resolve(db, model_config_id=None)).config_id == str(enabled.id)
 
 
 async def test_system_reaches_provider_from_orchestrator(api, actors, db, monkeypatch):
@@ -192,8 +193,10 @@ async def test_system_reaches_provider_from_orchestrator(api, actors, db, monkey
     response = await api.post(PREFIX + "/ai/chat/stream", headers=auth(actors["alice"]), json={
         "content": "hi", "assistantId": str(assistant.id), "skills": ["test"], "projectId": str(project.id)})
     assert response.status_code == 200
+    system = captured[0]["messages"][0]
+    assert system["role"] == "system"
     for marker in ("persona-marker", "skill-marker", "design-marker"):
-        assert marker in captured[0]["system"]
+        assert marker in system["content"]
 
 
 async def test_tool_has_no_url_fallback(db, actors, monkeypatch):

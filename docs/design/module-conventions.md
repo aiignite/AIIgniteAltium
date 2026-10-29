@@ -52,3 +52,17 @@
 - 端点：`/ai/skills`（CRUD）、`/ai/skills/resolve`（关键词编排，阈值 15、Top-K）、`/ai/assistants`（CRUD + `/default`）；系统技能不可删改 code，系统助手不可删
 - 编排：`orchestrator.compose_system_prompt` = BASE_PROMPT + 助手人设 + 各技能提示词 + 设计上下文；SSE 新增 `skills_activated` 事件；`ChatStreamIn` 新增 `assistantId` / `skills[]`（保留 `skill` 兼容旧客户端）
 - 前端：`components/ai/`（AssistantAvatar / AssistantPicker / SkillActivationCard）、`pages/AssistantsPage.tsx`（助手卡片网格 + 技能库）、工作台内嵌对话面板（欢迎卡/候选技能条/激活卡/历史面板）；基础样式类集中在 `index.css` 的 `.ai-*`
+
+## 3.2 已落地（2026-10-18，对齐 AIDriveNote AI 平台）
+
+- 页面：`/ai-config`（模型 / 助手 / 技能三 Tab，`?tab=` 同步 URL）；`/assistants`、`/models` 重定向兼容；助手/技能面板拆到 `pages/ai/`
+- 模型表 `ai_model_configs` 扩容：`temperature/max_tokens/top_p/context_window/supports_tools/supports_image/speed/cost/is_system` + 密钥 `api_key_enc/key_hint` + 测试 `test_status/test_latency_ms/tested_at/last_error`；助手加 `temperature/max_tokens/tool_codes/greeting`；技能加 `tool_codes/priority/extra_config`
+- Provider：`services/ai/providers/` 包（工厂 + 注册表 + 预设模板），`mock | openai | ollama | llamacpp | anthropic`；ollama 走**原生 `/api/chat`**（支持 images / options / eval_count），llamacpp 复用 OpenAI 兼容协议，二者免 Key
+- 工具：`GET /ai/tools/registry` 暴露注册表；助手/技能表单用真实工具多选（`ToolChipSelect`），空选=全部，编排器按「模型能力 ∩ 助手/技能并集」裁剪
+- 技能打分：code 50 / name 40 / 关键词 15 / 助手绑定 10 / 优先级 0-10；`extra_config.negative_keywords` 命中扣 40
+- 参考仓库获取（沙箱内）：`E:\DSH\hy2\git-gh.cmd`（git 必须 `http.sslBackend=openssl` + `http.proxy=http://127.0.0.1:7891`；curl/Invoke-WebRequest 走 Schannel 必失败）
+- 路由：`services/ai/llm_router.resolve` 五层（请求 → 会话 → 助手 → 默认 → 兜底），无可用模型抛 `NoAvailableModelError`（SSE `code=no_model`）
+- 密钥：`secret_crypto`（Fernet，`enc:v1:` 前缀），响应只给 `hasKey/keyHint`；历史明文启动时自动加密升级
+- 端点：`/ai/models/providers|export|test|{id}/test|{id}/default|{id}/duplicate`、`/ai/assistants/{id}/prompt-preview|duplicate`、`/ai/skills/{id}/duplicate`；写操作默认限管理员（`ai_config_write_admin_only`）
+- 迁移：`database_patches.AI_PLATFORM_STATEMENTS` 单一事实源 + `backend/scripts/migrate_ai_platform.py` 可独立重放（仍为幂等 ALTER，未引入 Alembic）
+- 自检：`test/check_ai_platform.py`（无需数据库，12 项）

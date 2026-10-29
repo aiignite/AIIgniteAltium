@@ -36,6 +36,8 @@ class Message(UUIDPkMixin, TimestampMixin, Base):
     model_config_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("ai_model_configs.id"), nullable=True)
     provider: Mapped[str] = mapped_column(String(30), default="", nullable=False)
     duration_ms: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     meta: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     error: Mapped[str] = mapped_column(Text, default="", nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

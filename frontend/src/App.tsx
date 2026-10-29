@@ -5,7 +5,7 @@ import { LoginPage } from './pages/LoginPage'
 import { WorkbenchPage } from './pages/WorkbenchPage'
 import { ProjectsPage } from './pages/ProjectsPage'
 import { ProjectDetailPage } from './pages/ProjectDetailPage'
-import { AssistantsPage } from './pages/AssistantsPage'
+import { AIConfigPage } from './pages/AIConfigPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { ConnectionsPage } from './pages/ConnectionsPage'
 import { Center, Loader } from '@mantine/core'
@@ -24,7 +24,10 @@ export default function App() {
     <Routes>
       <Route element={<AppLayout />}>
         <Route path="/" element={<WorkbenchPage />} />
-        <Route path="/assistants" element={<AssistantsPage />} />
+        <Route path="/ai-config" element={<AIConfigPage />} />
+        {/* 兼容旧入口与书签 */}
+        <Route path="/assistants" element={<Navigate to="/ai-config?tab=assistants" replace />} />
+        <Route path="/models" element={<Navigate to="/ai-config?tab=models" replace />} />
         <Route path="/projects" element={<ProjectsPage />} />
         <Route path="/projects/:projectId" element={<ProjectDetailPage />} />
         <Route path="/connections" element={<ConnectionsPage />} />

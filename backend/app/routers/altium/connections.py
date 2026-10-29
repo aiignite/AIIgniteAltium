@@ -48,6 +48,11 @@ class GrantsOut(GrantsIn):
     connection_id: UUID
 
 
+class CommandIn(CamelModel):
+    name: str = Field(min_length=1, max_length=100)
+    params: dict = {}
+
+
 def _out(c: GatewayConnection) -> ConnectionOut:
     return ConnectionOut(
         id=str(c.id), name=c.name, base_url=display_base_url(c.base_url), has_token=bool(c.api_token),
@@ -128,6 +133,21 @@ async def test_connection(connection_id: UUID, db: AsyncSession = Depends(get_db
     await db.commit()
     await db.refresh(conn)
     return _out(conn)
+
+
+@router.post("/{connection_id}/command")
+async def run_command(
+    connection_id: UUID,
+    body: CommandIn,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
+) -> dict:
+    """执行 gateway 命令（读命令直接执行；写命令需带 dry_run/confirmed 参数）。"""
+    conn = await get_accessible_connection(db, connection_id, user.id)
+    try:
+        return await GatewayClient(conn.base_url, conn.api_token).command(body.name, body.params)
+    except GatewayError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
 
 
 @router.get("/{connection_id}/live/summary")

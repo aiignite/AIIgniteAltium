@@ -62,7 +62,14 @@ class MockAltiumDriver(AltiumDriver):
             ]
             return {"ok": True, "count": len(nets), "items": nets, "document": "mock_sch.SchDoc"}
         if op == "pcb_components":
-            return {"ok": True, "count": 5, "items": [dict(c) for c in _MOCK_COMPONENTS], "document": "mock_pcb.PcbDoc"}
+            items = []
+            for i, c in enumerate(_MOCK_COMPONENTS):
+                item = dict(c)
+                item["x"] = 2000 + i * 400
+                item["y"] = 1500 + i * 300
+                item["rotation"] = (i * 90) % 360
+                items.append(item)
+            return {"ok": True, "count": len(items), "items": items, "document": "mock_pcb.PcbDoc"}
         if op == "pcb_stats":
             return {
                 "ok": True,
@@ -91,6 +98,24 @@ class MockAltiumDriver(AltiumDriver):
             }
         if op == "take_screenshot":
             return {"ok": True, "format": "svg", "data": _svg_png_data_uri()}
+        if op == "pcb_highlight_net":
+            net = str(params.get("net") or "")
+            if not net:
+                return {"ok": False, "error": "missing net param"}
+            return {"ok": True, "count": 1, "net": net, "mode": 1 if str(params.get("mode", "1")) != "0" else 0}
+        if op == "pcb_move_component":
+            designator = str(params.get("designator") or "")
+            if not designator:
+                return {"ok": False, "error": "missing designator/x/y params"}
+            x, y = params.get("x"), params.get("y")
+            if x is None or y is None:
+                return {"ok": False, "error": "missing designator/x/y params"}
+            return {"ok": True, "designator": designator, "x": x, "y": y}
+        if op == "pcb_rotate_component":
+            designator = str(params.get("designator") or "")
+            if not designator:
+                return {"ok": False, "error": "missing designator/rotation params"}
+            return {"ok": True, "designator": designator, "rotation": params.get("rotation")}
         return {"ok": False, "error": f"mock driver 未实现 op: {op}"}
 
     def is_alive(self) -> bool:

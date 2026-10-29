@@ -68,8 +68,18 @@ def _check_address(value: str) -> None:
         raise OutboundError()
 
 
-async def validate_outbound_url(value: str) -> str:
-    normalized = approved_base_url(value)
+async def validate_outbound_url(value: str, *, allow_private: bool = False) -> str:
+    """校验出站地址；allow_private 仅绕过白名单（仍拒绝链路本地/元数据等特殊地址）。
+
+    白名单用于云端 provider；本地推理（ollama / llama.cpp）在显式开启
+    ``ai_allow_private_model_hosts`` 时允许私网/回环地址。
+    """
+    try:
+        normalized = approved_base_url(value)
+    except OutboundError:
+        if not allow_private:
+            raise
+        normalized = normalize_base_url(value)
     parts = urlsplit(normalized)
     try:
         address = ipaddress.ip_address(parts.hostname)

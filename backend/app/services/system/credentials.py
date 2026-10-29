@@ -1,3 +1,6 @@
+import base64
+import hashlib
+
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import HTTPException
 
@@ -20,21 +23,49 @@ def _fernet() -> Fernet:
         raise CredentialError() from None
 
 
+def _legacy_fernet() -> Fernet:
+    """历史派生密钥（secret_crypto 旧实现）：用于读取未迁移的密文。"""
+    material = settings.ai_secret_key or settings.secret_key
+    digest = hashlib.sha256(f"aidrive-altium|{material}".encode("utf-8")).digest()
+    return Fernet(base64.urlsafe_b64encode(digest))
+
+
+def _decrypt_with(value: str, fernet: Fernet) -> str | None:
+    try:
+        return fernet.decrypt(value[len(PREFIX):].encode("ascii")).decode("utf-8")
+    except (InvalidToken, ValueError, UnicodeError):
+        return None
+
+
+def try_decrypt(value: str) -> str | None:
+    """依次尝试专用密钥与历史派生密钥；无法解密返回 None。"""
+    if not value:
+        return ""
+    if not value.startswith(PREFIX):
+        return None
+    for factory in (_fernet, _legacy_fernet):
+        try:
+            plain = _decrypt_with(value, factory())
+        except CredentialError:
+            continue
+        if plain is not None:
+            return plain
+    return None
+
+
 def encrypt_credential(value: str) -> str:
     if not value:
         return ""
+    if value.startswith(PREFIX):
+        return value
     return PREFIX + _fernet().encrypt(value.encode("utf-8")).decode("ascii")
 
 
 def decrypt_credential(value: str) -> str:
-    if not value:
-        return ""
-    if not value.startswith(PREFIX):
+    plain = try_decrypt(value)
+    if plain is None:
         raise CredentialError()
-    try:
-        return _fernet().decrypt(value[len(PREFIX):].encode("ascii")).decode("utf-8")
-    except (InvalidToken, ValueError, UnicodeError):
-        raise CredentialError() from None
+    return plain
 
 
 def validate_credential(value: str) -> None:
