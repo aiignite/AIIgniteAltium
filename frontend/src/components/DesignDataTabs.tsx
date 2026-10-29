@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
-import { Badge, Group, Image, Loader, Modal, Pagination, Table, Tabs, Text, TextInput } from '@mantine/core'
+import { ActionIcon, Badge, Button, Group, Image, Loader, Modal, Pagination, Table, Tabs, Text, TextInput, Tooltip } from '@mantine/core'
+import { IconSparkles } from '@tabler/icons-react'
 import { api } from '../api/client'
+import { safeFilename, svgUrlToPngBlob, triggerDownload } from '../utils/download'
 
 interface SvgItem {
   svgId: string
@@ -34,9 +36,11 @@ interface BomRow {
   quantity: number
 }
 
-function SvgView({ projectId, svgId }: { projectId: string; svgId: string }) {
+function SvgView({ projectId, svgId, title }: { projectId: string; svgId: string; title: string }) {
   const [url, setUrl] = useState<string | null>(null)
   const [error, setError] = useState('')
+  const [pngBusy, setPngBusy] = useState(false)
+  const [pngError, setPngError] = useState('')
   useEffect(() => {
     let revoke: string | null = null
     api
@@ -50,12 +54,46 @@ function SvgView({ projectId, svgId }: { projectId: string; svgId: string }) {
       if (revoke) URL.revokeObjectURL(revoke)
     }
   }, [projectId, svgId])
+
+  const baseName = safeFilename(title || svgId)
+
+  const downloadPng = async () => {
+    if (!url || pngBusy) return
+    setPngBusy(true)
+    setPngError('')
+    try {
+      const blob = await svgUrlToPngBlob(url, 2)
+      const pngUrl = URL.createObjectURL(blob)
+      triggerDownload(pngUrl, `${baseName}@2x.png`)
+      window.setTimeout(() => URL.revokeObjectURL(pngUrl), 1500)
+    } catch (e) {
+      setPngError(e instanceof Error ? e.message : 'PNG 导出失败')
+    } finally {
+      setPngBusy(false)
+    }
+  }
+
   if (error) return <Text c="red" size="sm">{error}</Text>
   if (!url) return <Loader size="sm" />
   return (
-    <div className="svg-viewer" style={{ maxHeight: 'calc(100vh - 320px)', overflow: 'auto', border: '1px solid var(--mantine-color-gray-3)' }}>
-      <Image src={url} alt={svgId} />
-    </div>
+    <>
+      <Group justify="flex-end" gap="xs" mb={6}>
+        <Button size="compact-xs" variant="light" onClick={() => triggerDownload(url, `${baseName}.svg`)}>
+          下载 SVG
+        </Button>
+        <Button size="compact-xs" variant="light" loading={pngBusy} onClick={downloadPng}>
+          下载 PNG（2×）
+        </Button>
+      </Group>
+      {pngError && (
+        <Text c="red" size="xs" mb={4}>
+          {pngError}
+        </Text>
+      )}
+      <div className="svg-viewer" style={{ maxHeight: 'calc(100vh - 320px)', overflow: 'auto', border: '1px solid var(--mantine-color-gray-3)' }}>
+        <Image src={url} alt={title || svgId} />
+      </div>
+    </>
   )
 }
 
@@ -65,12 +103,16 @@ function DataList<T extends object>({
   render,
   columns,
   searchPlaceholder,
+  askQuestion,
+  onAskAI,
 }: {
   projectId: string
   kind: 'components' | 'nets' | 'bom'
   render: (row: T) => ReactNode
   columns: string[]
   searchPlaceholder: string
+  askQuestion?: (row: T) => string
+  onAskAI?: (question: string) => void
 }) {
   const [page, setPage] = useState(1)
   const [search, setSearch] = useState('')
@@ -124,6 +166,7 @@ function DataList<T extends object>({
                   {columns.map((c) => (
                     <Table.Th key={c}>{c}</Table.Th>
                   ))}
+                  {onAskAI && askQuestion && <Table.Th style={{ width: 1 }}>问 AI</Table.Th>}
                 </Table.Tr>
               </Table.Thead>
               <Table.Tbody>
@@ -134,6 +177,21 @@ function DataList<T extends object>({
                     style={kind === 'nets' ? { cursor: 'pointer' } : undefined}
                   >
                     {render(row)}
+                    {onAskAI && askQuestion && (
+                      <Table.Td style={{ width: 1 }} onClick={(e) => e.stopPropagation()}>
+                        <Tooltip label="问 AI">
+                          <ActionIcon
+                            size="sm"
+                            variant="subtle"
+                            color="blue"
+                            aria-label={`问 AI：${askQuestion(row).slice(0, 24)}`}
+                            onClick={() => onAskAI(askQuestion(row))}
+                          >
+                            <IconSparkles size={14} />
+                          </ActionIcon>
+                        </Tooltip>
+                      </Table.Td>
+                    )}
                   </Table.Tr>
                 ))}
               </Table.Tbody>
@@ -180,7 +238,13 @@ function DataList<T extends object>({
   )
 }
 
-export function DesignDataTabs({ projectId }: { projectId: string }) {
+export function DesignDataTabs({
+  projectId,
+  onAskAI,
+}: {
+  projectId: string
+  onAskAI?: (question: string) => void
+}) {
   const [svgs, setSvgs] = useState<SvgItem[]>([])
   useEffect(() => {
     api.get<SvgItem[]>(`/files/projects/${projectId}/svgs`).then(setSvgs)
@@ -199,12 +263,12 @@ export function DesignDataTabs({ projectId }: { projectId: string }) {
       </Tabs.List>
       {sch && (
         <Tabs.Panel value="sch">
-          <SvgView projectId={projectId} svgId={sch.svgId} />
+          <SvgView projectId={projectId} svgId={sch.svgId} title={sch.title} />
         </Tabs.Panel>
       )}
       {pcb && (
         <Tabs.Panel value="pcb">
-          <SvgView projectId={projectId} svgId={pcb.svgId} />
+          <SvgView projectId={projectId} svgId={pcb.svgId} title={pcb.title} />
         </Tabs.Panel>
       )}
       <Tabs.Panel value="components">
@@ -213,6 +277,10 @@ export function DesignDataTabs({ projectId }: { projectId: string }) {
           kind="components"
           columns={['位号', '值', '封装', '描述', '图纸']}
           searchPlaceholder="搜索位号/值/封装…"
+          askQuestion={(r) =>
+            `请分析元件 ${r.designator}（值 ${r.value || '未标注'}，封装 ${r.footprint || '未标注'}）在本设计中的作用与潜在风险。`
+          }
+          onAskAI={onAskAI}
           render={(r) => (
             <>
               <Table.Td>{r.designator}</Table.Td>
@@ -230,6 +298,8 @@ export function DesignDataTabs({ projectId }: { projectId: string }) {
           kind="nets"
           columns={['网络名', '连接数']}
           searchPlaceholder="搜索网络名…"
+          askQuestion={(r) => `请分析网络 ${r.name}（${r.terminalCount} 个连接点）的连接关系，是否存在悬空或异常？`}
+          onAskAI={onAskAI}
           render={(r) => (
             <>
               <Table.Td>{r.name}</Table.Td>
@@ -251,6 +321,10 @@ export function DesignDataTabs({ projectId }: { projectId: string }) {
           kind="bom"
           columns={['值', '封装', '数量', '位号', 'DNP']}
           searchPlaceholder="搜索 BOM…"
+          askQuestion={(r) =>
+            `请分析 BOM 项 ${r.value || '未标注'}（封装 ${r.footprint || '未标注'}，数量 ${r.quantity}）的选型、采购与替代风险。`
+          }
+          onAskAI={onAskAI}
           render={(r) => (
             <>
               <Table.Td>{r.value}</Table.Td>

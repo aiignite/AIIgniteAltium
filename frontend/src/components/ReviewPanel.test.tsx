@@ -1,11 +1,11 @@
 import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from '../test/render'
 import { ReviewPanel } from './ReviewPanel'
 
 const { api } = vi.hoisted(() => ({
-  api: { get: vi.fn(), post: vi.fn() },
+  api: { get: vi.fn(), post: vi.fn(), blob: vi.fn() },
 }))
 
 vi.mock('../api/client', () => ({ api }))
@@ -14,7 +14,7 @@ const run = {
   id: 'r1',
   snapshotVersion: 1,
   status: 'completed',
-  rulesetVersion: 'p1.1',
+  rulesetVersion: 'p2.0',
   counts: { error: 1, warning: 1, info: 0 },
   createdAt: '2026-10-29T00:00:00Z',
   findings: [
@@ -41,6 +41,11 @@ describe('ReviewPanel', () => {
   beforeEach(() => {
     api.get.mockReset()
     api.post.mockReset()
+    api.blob.mockReset()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
   })
 
   it('runs a review and renders findings with version binding', async () => {
@@ -53,7 +58,7 @@ describe('ReviewPanel', () => {
     expect(await screen.findByText('位号重复')).toBeTruthy()
     expect(screen.getByText('元件缺少封装')).toBeTruthy()
     expect(screen.getByText('错误 1')).toBeTruthy()
-    expect(screen.getByText('规则集 p1.1')).toBeTruthy()
+    expect(screen.getByText('规则集 p2.0')).toBeTruthy()
     expect(api.post).toHaveBeenCalledWith('/files/projects/p1/reviews')
   })
 
@@ -68,5 +73,34 @@ describe('ReviewPanel', () => {
     api.get.mockResolvedValue([])
     render(<ReviewPanel projectId="p1" currentVersion={0} />)
     expect(screen.getByRole('button', { name: '运行审查' })).toHaveProperty('disabled', true)
+  })
+
+  it('offers one-click AI questions for findings and the whole review', async () => {
+    const onAskAI = vi.fn()
+    api.get.mockResolvedValueOnce([run]).mockResolvedValueOnce(run)
+    render(<ReviewPanel projectId="p1" currentVersion={1} onAskAI={onAskAI} />)
+    await screen.findByText('位号重复')
+    await userEvent.click(screen.getByRole('button', { name: '问 AI：位号重复' }))
+    expect(onAskAI.mock.calls[0][0]).toContain('位号重复')
+    expect(onAskAI.mock.calls[0][0]).toContain('duplicate_designator')
+    await userEvent.click(screen.getByRole('button', { name: '让 AI 解读' }))
+    expect(onAskAI.mock.calls[1][0]).toContain('快照 v1')
+  })
+
+  it('downloads the review report as markdown', async () => {
+    const anchors: HTMLAnchorElement[] = []
+    api.get.mockResolvedValueOnce([run]).mockResolvedValueOnce(run)
+    api.blob.mockResolvedValue('blob:report')
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    const append = document.body.appendChild.bind(document.body)
+    vi.spyOn(document.body, 'appendChild').mockImplementation((node) => {
+      if (node instanceof HTMLAnchorElement) anchors.push(node)
+      return append(node)
+    })
+    render(<ReviewPanel projectId="p1" currentVersion={1} />)
+    await screen.findByText('位号重复')
+    await userEvent.click(screen.getByRole('button', { name: '导出报告' }))
+    await waitFor(() => expect(api.blob).toHaveBeenCalledWith('/files/projects/p1/reviews/r1/report.md'))
+    expect(anchors.at(-1)?.download).toBe('设计审查报告-v1.md')
   })
 })

@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -8,8 +8,9 @@ from app.database import get_db
 from app.models.files.review_run import ReviewRun
 from app.schemas import CamelModel
 from app.security import get_current_user
+from app.services.files import exports
 from app.services.files.access import get_owned_project
-from app.services.files.review import RULESET_VERSION, review_snapshot, summarize
+from app.services.files.review import RULESET_VERSION, report_markdown, review_snapshot, summarize
 
 router = APIRouter(prefix="/files/projects", tags=["files"])
 
@@ -99,3 +100,28 @@ async def get_review(
     project = await get_owned_project(db, project_id, user.id)
     run = await _get_run(db, project.id, run_id)
     return _out(run, with_findings=True)
+
+
+@router.get("/{project_id}/reviews/{run_id}/report.md")
+async def export_review_report(
+    project_id: UUID,
+    run_id: UUID,
+    user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    project = await get_owned_project(db, project_id, user.id)
+    run = await _get_run(db, project.id, run_id)
+    content = report_markdown(
+        project.name,
+        snapshot_version=run.snapshot_version,
+        ruleset_version=run.ruleset_version,
+        counts=run.counts or {},
+        findings=run.findings or [],
+        created_at=run.created_at.isoformat(),
+    )
+    filename = f"{project.name}-设计审查报告-v{run.snapshot_version}.md"
+    return Response(
+        content=content.encode("utf-8"),
+        media_type="text/markdown; charset=utf-8",
+        headers=exports.attachment_headers(filename),
+    )

@@ -65,7 +65,15 @@ export const api = {
     const headers: Record<string, string> = {}
     if (token) headers['Authorization'] = `Bearer ${token}`
     const resp = await fetch(`${BASE}${path}`, { headers })
-    if (!resp.ok) throw new ApiError(resp.status, `HTTP ${resp.status}`)
+    if (!resp.ok) {
+      let detail = `HTTP ${resp.status}`
+      try {
+        detail = (await resp.json()).detail ?? detail
+      } catch {
+        /* ignore */
+      }
+      throw new ApiError(resp.status, detail)
+    }
     return URL.createObjectURL(await resp.blob())
   },
 }

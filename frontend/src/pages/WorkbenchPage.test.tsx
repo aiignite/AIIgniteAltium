@@ -79,6 +79,7 @@ async function renderReady() {
 
 describe('WorkbenchPage design source selection', () => {
   beforeEach(() => {
+    localStorage.clear()
     Object.values(api).forEach((fn) => fn.mockReset())
     streamChat.mockReset()
     setupApi()
@@ -163,10 +164,21 @@ describe('WorkbenchPage design source selection', () => {
     expect(screen.getByText('部分回答')).toBeTruthy()
     expect(screen.queryByText('连接中断，请重试')).toBeNull()
   })
+
+  it('sends a suggested question in one click', async () => {
+    streamChat.mockImplementation(async (_body, onEvent: (e: ChatStreamEvent) => void) => {
+      onEvent({ type: 'done' })
+    })
+    await renderReady()
+    await userEvent.click(screen.getByRole('button', { name: '帮我审查这个工程的原理图' }))
+    await waitFor(() => expect(streamChat).toHaveBeenCalled())
+    expect(streamChat.mock.calls[0][0].content).toBe('帮我审查这个工程的原理图')
+  })
 })
 
 describe('WorkbenchPage deep links', () => {
   beforeEach(() => {
+    localStorage.clear()
     Object.values(api).forEach((fn) => fn.mockReset())
     streamChat.mockReset()
     setupApi()
@@ -186,5 +198,30 @@ describe('WorkbenchPage deep links', () => {
       expect((screen.getByRole('combobox', { name: '设计来源' }) as HTMLInputElement).value).toBe('Altium 实时连接'),
     )
     expect((screen.getByRole('combobox', { name: '实时连接' }) as HTMLInputElement).value).toBe('车间网关（已连接）')
+  })
+
+  it('auto-sends the ask parameter once the project is ready', async () => {
+    streamChat.mockImplementation(async (_body, onEvent: (e: ChatStreamEvent) => void) => {
+      onEvent({ type: 'done' })
+    })
+    render(<WorkbenchPage />, { route: `/?projectId=p1&ask=${encodeURIComponent('这个工程的 BOM 有什么风险？')}` })
+    await waitFor(() => expect(streamChat).toHaveBeenCalled())
+    const body = streamChat.mock.calls[0][0]
+    expect(body.projectId).toBe('p1')
+    expect(body.content).toBe('这个工程的 BOM 有什么风险？')
+  })
+
+  it('restores the last design source on the next visit', async () => {
+    const first = render(<WorkbenchPage />, { route: '/?projectId=p1' })
+    await waitFor(() =>
+      expect((screen.getByRole('combobox', { name: '设计来源' }) as HTMLInputElement).value).toBe('离线解析工程'),
+    )
+    await waitFor(() => expect(localStorage.getItem('aidrive.workbench.prefs')).toContain('"source":"project"'))
+    first.unmount()
+    render(<WorkbenchPage />)
+    await waitFor(() =>
+      expect((screen.getByRole('combobox', { name: '设计来源' }) as HTMLInputElement).value).toBe('离线解析工程'),
+    )
+    expect((screen.getByRole('combobox', { name: '已解析工程' }) as HTMLInputElement).value).toBe('Board A（12 元件）')
   })
 })

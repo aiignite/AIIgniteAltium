@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,7 +13,7 @@ from app.models.files.snapshot_version import SnapshotVersion
 from app.models.files.uploaded_project import UploadedProject
 from app.schemas import CamelModel
 from app.security import get_current_user
-from app.services.files import parse_service
+from app.services.files import diff, exports, parse_service
 from app.services.files.access import get_owned_project as _get_owned_project
 from app.services.files.jobs import ParseJobConflictError, enqueue_parse, require_enqueue
 
@@ -180,6 +180,27 @@ async def get_version(
     }
 
 
+@router.get("/{project_id}/diff")
+async def diff_versions(
+    project_id: UUID,
+    from_version: int | None = Query(default=None, alias="from", ge=1),
+    to_version: int | None = Query(default=None, alias="to", ge=1),
+    user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    project = await _get_owned_project(db, project_id, user.id)
+    rows = await db.scalars(select(SnapshotVersion).where(SnapshotVersion.project_id == project.id))
+    versions = {row.version: row for row in rows}
+    target = to_version if to_version is not None else project.current_version
+    source = from_version if from_version is not None else target - 1
+    if source not in versions or target not in versions:
+        raise HTTPException(status_code=404, detail="版本不存在")
+    result = diff.diff_snapshots(versions[source].snapshot or {}, versions[target].snapshot or {})
+    result["fromVersion"] = source
+    result["toVersion"] = target
+    return result
+
+
 @router.get("/{project_id}", response_model=ProjectDetailOut)
 async def get_project(
     project_id: UUID,
@@ -280,25 +301,7 @@ async def list_bom(
     db: AsyncSession = Depends(get_db),
 ):
     project = await _get_owned_project(db, project_id, user.id)
-    rows = _snapshot_rows(project, "bom")
-    merged: dict[str, dict[str, Any]] = {}
-    order: list[str] = []
-    for row in rows:
-        key = f"{row.get('value', '')}|{row.get('footprint', '')}|{row.get('dnp', False)}"
-        if key not in merged:
-            merged[key] = {
-                "value": row.get("value", ""),
-                "footprint": row.get("footprint", ""),
-                "libraryRef": row.get("libraryRef", ""),
-                "description": row.get("description", ""),
-                "dnp": bool(row.get("dnp")),
-                "designators": [],
-                "quantity": 0,
-            }
-            order.append(key)
-        merged[key]["designators"].append(row.get("designator", "?"))
-        merged[key]["quantity"] += 1
-    out = [merged[k] for k in order]
+    out = exports.merge_bom(_snapshot_rows(project, "bom"))
     if search:
         needle = search.lower()
         out = [r for r in out if any(needle in str(v).lower() for v in r.values())]

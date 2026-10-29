@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Alert, Badge, Button, Card, Group, Stack, Table, Text } from '@mantine/core'
+import { ActionIcon, Alert, Badge, Button, Card, Group, Stack, Table, Text, Tooltip } from '@mantine/core'
+import { IconDownload, IconSparkles } from '@tabler/icons-react'
 import { api } from '../api/client'
+import { safeFilename, triggerDownload } from '../utils/download'
 
 interface ReviewRun {
   id: string
@@ -30,7 +32,28 @@ const SEVERITY: Record<string, { color: string; label: string }> = {
   info: { color: 'blue', label: '提示' },
 }
 
-export function ReviewPanel({ projectId, currentVersion }: { projectId: string; currentVersion: number }) {
+function summarizeQuestion(detail: ReviewDetail): string {
+  const lines = detail.findings.map(
+    (f) =>
+      `- [${SEVERITY[f.severity]?.label ?? f.severity}] ${f.title}（${f.refs.join('、') || `共 ${f.count} 项`}）`,
+  )
+  return `请解读快照 v${detail.snapshotVersion} 的设计审查结果（错误 ${detail.counts.error ?? 0}、警告 ${detail.counts.warning ?? 0}、提示 ${detail.counts.info ?? 0}），按优先级给出整改建议：\n${lines.join('\n')}`
+}
+
+function findingQuestion(f: Finding): string {
+  const refs = f.refs.join('、') || `共 ${f.count} 项`
+  return `请解释审查问题「${f.title}」（规则 ${f.rule}，涉及 ${refs}）。问题说明：${f.detail}。请给出定位方法和整改建议。`
+}
+
+export function ReviewPanel({
+  projectId,
+  currentVersion,
+  onAskAI,
+}: {
+  projectId: string
+  currentVersion: number
+  onAskAI?: (question: string) => void
+}) {
   const [runs, setRuns] = useState<ReviewRun[]>([])
   const [current, setCurrent] = useState<ReviewDetail | null>(null)
   const [busy, setBusy] = useState(false)
@@ -80,6 +103,18 @@ export function ReviewPanel({ projectId, currentVersion }: { projectId: string; 
     }
   }, [projectId, loadRuns])
 
+  const downloadReport = useCallback(async () => {
+    if (!current) return
+    setError('')
+    try {
+      const url = await api.blob(`/files/projects/${projectId}/reviews/${current.id}/report.md`)
+      triggerDownload(url, safeFilename(`设计审查报告-v${current.snapshotVersion}.md`))
+      window.setTimeout(() => URL.revokeObjectURL(url), 1500)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '报告导出失败')
+    }
+  }, [projectId, current])
+
   return (
     <Card withBorder mt="md" p="md">
       <Group justify="space-between" mb="sm">
@@ -89,9 +124,31 @@ export function ReviewPanel({ projectId, currentVersion }: { projectId: string; 
             基于当前快照 v{currentVersion} 的确定性规则检查，不消耗模型额度
           </Text>
         </Group>
-        <Button size="xs" onClick={runReview} loading={busy} disabled={currentVersion === 0}>
-          运行审查
-        </Button>
+        <Group gap="xs">
+          {onAskAI && current && current.findings.length > 0 && (
+            <Button
+              size="xs"
+              variant="light"
+              leftSection={<IconSparkles size={14} />}
+              onClick={() => onAskAI(summarizeQuestion(current))}
+            >
+              让 AI 解读
+            </Button>
+          )}
+          {current && (
+            <Button
+              size="xs"
+              variant="light"
+              leftSection={<IconDownload size={14} />}
+              onClick={downloadReport}
+            >
+              导出报告
+            </Button>
+          )}
+          <Button size="xs" onClick={runReview} loading={busy} disabled={currentVersion === 0}>
+            运行审查
+          </Button>
+        </Group>
       </Group>
       {error && (
         <Alert color="red" mb="sm" p="xs">
@@ -146,6 +203,7 @@ export function ReviewPanel({ projectId, currentVersion }: { projectId: string; 
                   <Table.Th>问题</Table.Th>
                   <Table.Th>对象</Table.Th>
                   <Table.Th>说明</Table.Th>
+                  {onAskAI && <Table.Th style={{ width: 1 }}>问 AI</Table.Th>}
                 </Table.Tr>
               </Table.Thead>
               <Table.Tbody>
@@ -175,6 +233,21 @@ export function ReviewPanel({ projectId, currentVersion }: { projectId: string; 
                         {f.detail}
                       </Text>
                     </Table.Td>
+                    {onAskAI && (
+                      <Table.Td style={{ width: 1 }}>
+                        <Tooltip label="问 AI">
+                          <ActionIcon
+                            size="sm"
+                            variant="subtle"
+                            color="blue"
+                            aria-label={`问 AI：${f.title}`}
+                            onClick={() => onAskAI(findingQuestion(f))}
+                          >
+                            <IconSparkles size={14} />
+                          </ActionIcon>
+                        </Tooltip>
+                      </Table.Td>
+                    )}
                   </Table.Tr>
                 ))}
               </Table.Tbody>

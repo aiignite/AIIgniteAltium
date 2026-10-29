@@ -10,6 +10,7 @@ import {
   Select,
   Text,
   Textarea,
+  TextInput,
   Tooltip,
 } from '@mantine/core'
 import {
@@ -18,6 +19,7 @@ import {
   IconHistory,
   IconPlayerStop,
   IconPlus,
+  IconSearch,
   IconSend,
   IconSparkles,
   IconX,
@@ -95,6 +97,26 @@ const SOURCE_LABEL: Record<SourceKind, string> = {
   live: 'Altium 实时连接',
 }
 
+const PREFS_KEY = 'aidrive.workbench.prefs'
+
+const FOLLOW_UPS = ['继续深入分析主要风险', '给出整改与验证清单', '解释关键网络的设计意图']
+
+interface WorkbenchPrefs {
+  source?: SourceKind
+  projectId?: string | null
+  connectionId?: string | null
+  assistantId?: string | null
+  modelId?: string | null
+}
+
+function loadPrefs(): WorkbenchPrefs {
+  try {
+    return JSON.parse(localStorage.getItem(PREFS_KEY) ?? '{}') as WorkbenchPrefs
+  } catch {
+    return {}
+  }
+}
+
 interface AIModelItem {
   id: string
   name: string
@@ -129,11 +151,13 @@ export function WorkbenchPage() {
   const [conversationId, setConversationId] = useState<string | null>(null)
   const [conversations, setConversations] = useState<ConversationItem[]>([])
   const [showHistory, setShowHistory] = useState(false)
+  const [historyQuery, setHistoryQuery] = useState('')
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null)
   const [searchParams] = useSearchParams()
   const viewportRef = useRef<HTMLDivElement>(null)
   const stickToBottom = useRef(true)
   const abortRef = useRef<AbortController | null>(null)
+  const pendingAsk = useRef(searchParams.get('ask'))
 
   const assistant = useMemo(
     () => assistants.find((a) => a.id === assistantId) ?? assistants.find((a) => a.isDefault) ?? null,
@@ -145,14 +169,22 @@ export function WorkbenchPage() {
   }, [])
 
   useEffect(() => {
-    const projectParam = searchParams.get('projectId')
-    const connectionParam = searchParams.get('connectionId')
+    const prefs = loadPrefs()
+    const explicitProject = searchParams.get('projectId')
+    const explicitConnection = searchParams.get('connectionId')
+    const projectParam =
+      explicitProject ?? (!explicitConnection && prefs.source === 'project' ? prefs.projectId ?? null : null)
+    const connectionParam =
+      explicitConnection ?? (!explicitProject && prefs.source === 'live' ? prefs.connectionId ?? null : null)
     api.get<ProjectSummary[]>('/files/projects').then((ps) => {
       const ready = ps.filter((p) => p.status === 'ready')
       setProjects(ready)
       if (projectParam && ready.some((p) => p.id === projectParam)) {
         setSource('project')
         setProjectId(projectParam)
+      } else if (explicitProject && pendingAsk.current) {
+        setInput(pendingAsk.current)
+        pendingAsk.current = null
       }
     })
     api
@@ -162,20 +194,35 @@ export function WorkbenchPage() {
         if (connectionParam && list.some((c) => c.id === connectionParam)) {
           setSource('live')
           setConnectionId(connectionParam)
+        } else if (explicitConnection && pendingAsk.current) {
+          setInput(pendingAsk.current)
+          pendingAsk.current = null
         }
       })
       .catch(() => setConnections([]))
     api.get<AssistantItem[]>('/ai/assistants').then((list) => {
       setAssistants(list.filter((a) => a.enabled))
-      setAssistantId((prev) => prev ?? list.find((a) => a.isDefault)?.id ?? list[0]?.id ?? null)
+      setAssistantId((prev) => {
+        if (prev) return prev
+        const saved = prefs.assistantId && list.some((a) => a.enabled && a.id === prefs.assistantId) ? prefs.assistantId : null
+        return saved ?? list.find((a) => a.isDefault)?.id ?? list[0]?.id ?? null
+      })
     })
     api.get<SkillItem[]>('/ai/skills').then((list) => setSkills(list.filter((s) => s.enabled)))
     api.get<AIModelItem[]>('/ai/models').then((list) => {
-      setModels(list.filter((m) => m.enabled))
-      setModelId(list.find((m) => m.enabled)?.id ?? null)
+      const enabled = list.filter((m) => m.enabled)
+      setModels(enabled)
+      setModelId(enabled.find((m) => m.id === prefs.modelId)?.id ?? enabled[0]?.id ?? null)
     })
     loadConversations()
   }, [loadConversations, searchParams])
+
+  useEffect(() => {
+    localStorage.setItem(
+      PREFS_KEY,
+      JSON.stringify({ source, projectId, connectionId, assistantId: assistant?.id ?? null, modelId }),
+    )
+  }, [source, projectId, connectionId, assistant?.id, modelId])
 
   useEffect(() => {
     if (stickToBottom.current) viewportRef.current?.scrollTo({ top: viewportRef.current.scrollHeight })
@@ -263,6 +310,20 @@ export function WorkbenchPage() {
 
   const selectedSkills = useMemo(() => candidates.filter((c) => c.selected).map((c) => c.code), [candidates])
 
+  const sourceName = useCallback(
+    (c: ConversationItem) => {
+      if (c.projectId) return projects.find((p) => p.id === c.projectId)?.name ?? '工程已删除'
+      if (c.connectionId) return connections.find((x) => x.id === c.connectionId)?.name ?? '连接已失效'
+      return '无设计'
+    },
+    [projects, connections],
+  )
+
+  const visibleConversations = useMemo(() => {
+    const q = historyQuery.trim().toLowerCase()
+    return q ? conversations.filter((c) => c.title.toLowerCase().includes(q)) : conversations
+  }, [conversations, historyQuery])
+
   const resetConversation = useCallback(() => {
     setMessages([])
     setConversationId(null)
@@ -300,9 +361,11 @@ export function WorkbenchPage() {
   )
 
   const sourceReady = source === 'none' || (source === 'project' ? !!projectId : !!connectionId)
+  const requestedProject = searchParams.get('projectId')
+  const requestedConnection = searchParams.get('connectionId')
 
-  const send = useCallback(async () => {
-    const content = input.trim()
+  const send = useCallback(async (override?: string) => {
+    const content = (override ?? input).trim()
     if (!content || streaming || !sourceReady) return
     setInput('')
     setCandidates((prev) => prev.filter((c) => c.selected))
@@ -382,6 +445,15 @@ export function WorkbenchPage() {
       /* 剪贴板不可用时保持无反馈 */
     }
   }, [])
+
+  useEffect(() => {
+    const question = pendingAsk.current
+    if (!question || streaming || !sourceReady) return
+    if (requestedProject && projectId !== requestedProject) return
+    if (requestedConnection && connectionId !== requestedConnection) return
+    pendingAsk.current = null
+    void send(question)
+  }, [streaming, sourceReady, send, requestedProject, requestedConnection, projectId, connectionId])
 
   // 欢迎卡「建议这样提问」：绑定技能 → 技能式提问；否则通用引导
   const suggestions = useMemo(() => {
@@ -517,13 +589,26 @@ export function WorkbenchPage() {
 
           {/* 历史面板 */}
           {showHistory && (
-            <ScrollArea.Autosize mah={220} mt={6}>
+            <ScrollArea.Autosize mah={240} mt={6}>
+              <TextInput
+                size="xs"
+                mb={4}
+                placeholder="搜索历史对话"
+                leftSection={<IconSearch size={12} />}
+                value={historyQuery}
+                onChange={(e) => setHistoryQuery(e.target.value)}
+              />
               {conversations.length === 0 && (
                 <Text size="xs" c="dimmed" ta="center" py="sm">
                   暂无历史对话
                 </Text>
               )}
-              {conversations.map((c) => (
+              {conversations.length > 0 && visibleConversations.length === 0 && (
+                <Text size="xs" c="dimmed" ta="center" py="sm">
+                  没有匹配的对话
+                </Text>
+              )}
+              {visibleConversations.map((c) => (
                 <Group
                   key={c.id}
                   wrap="nowrap"
@@ -543,8 +628,8 @@ export function WorkbenchPage() {
                       {c.title}
                     </Text>
                     <Text size="10px" c="dimmed">
-                      {assistants.find((a) => a.id === c.assistantId)?.name ?? '通用助手'} · {c.messageCount} 条 ·{' '}
-                      {timeAgo(c.updatedAt)}
+                      {sourceName(c)} · {assistants.find((a) => a.id === c.assistantId)?.name ?? '通用助手'} ·{' '}
+                      {c.messageCount} 条 · {timeAgo(c.updatedAt)}
                     </Text>
                   </Box>
                   <Button
@@ -606,7 +691,12 @@ export function WorkbenchPage() {
                   </Text>
                   <Group gap={4} wrap="wrap">
                     {suggestions.map((s) => (
-                      <button key={s} type="button" className="ai-quick-chip" onClick={() => setInput(s)}>
+                      <button
+                        key={s}
+                        type="button"
+                        className="ai-quick-chip"
+                        onClick={() => (sourceReady ? send(s) : setInput(s))}
+                      >
                         {s}
                       </button>
                     ))}
@@ -679,6 +769,23 @@ export function WorkbenchPage() {
                   </Box>
                 ),
               )}
+              {!streaming &&
+                messages[messages.length - 1]?.role === 'assistant' &&
+                !messages[messages.length - 1]?.error && (
+                  <Group gap={4} mt="xs" wrap="wrap">
+                    {FOLLOW_UPS.map((q) => (
+                      <button
+                        key={q}
+                        type="button"
+                        className="ai-quick-chip"
+                        disabled={!sourceReady}
+                        onClick={() => send(q)}
+                      >
+                        {q}
+                      </button>
+                    ))}
+                  </Group>
+                )}
             </Box>
           )}
         </ScrollArea>
@@ -734,6 +841,10 @@ export function WorkbenchPage() {
                   e.preventDefault()
                   send()
                 }
+                if (e.key === 'Escape' && streaming) {
+                  e.preventDefault()
+                  stop()
+                }
               }}
             />
             {streaming ? (
@@ -749,7 +860,7 @@ export function WorkbenchPage() {
               </Button>
             ) : (
               <Button
-                onClick={send}
+                onClick={() => send()}
                 disabled={!sourceReady}
                 px="sm"
                 className="ai-gradient"
@@ -766,7 +877,7 @@ export function WorkbenchPage() {
       {/* ===== 右：设计数据 ===== */}
       <Box style={{ flex: 1, minWidth: 0, height: '100%' }} visibleFrom="md">
         {source === 'project' && projectId ? (
-          <DesignDataTabs projectId={projectId} />
+          <DesignDataTabs projectId={projectId} onAskAI={(question) => send(question)} />
         ) : (
           <Paper withBorder p="xl" h="100%" radius="lg">
             <Text c="dimmed" ta="center" mt="xl">

@@ -4,7 +4,9 @@ import { Badge, Button, Card, Group, Loader, SimpleGrid, Text } from '@mantine/c
 import { IconRefresh, IconSparkles } from '@tabler/icons-react'
 import { api } from '../api/client'
 import { DesignDataTabs } from '../components/DesignDataTabs'
+import { ExportPanel } from '../components/ExportPanel'
 import { ReviewPanel } from '../components/ReviewPanel'
+import { VersionDiff } from '../components/VersionDiff'
 
 export interface ProjectDetail extends ProjectSummaryLike {
   snapshot: Snapshot
@@ -175,7 +177,22 @@ export function ProjectDetailPage() {
             </Text>
           )}
           <DesignDataTabs projectId={project.id} />
-          <ReviewPanel projectId={project.id} currentVersion={project.currentVersion ?? 0} />
+          <ExportPanel
+            projectId={project.id}
+            projectName={project.name}
+            version={project.currentVersion ?? 0}
+            hasPcb={(s.pcbs?.length ?? 0) > 0}
+          />
+          <VersionDiff
+            projectId={project.id}
+            currentVersion={project.currentVersion ?? 0}
+            onAskAI={(question) => navigate(`/?projectId=${project.id}&ask=${encodeURIComponent(question)}`)}
+          />
+          <ReviewPanel
+            projectId={project.id}
+            currentVersion={project.currentVersion ?? 0}
+            onAskAI={(question) => navigate(`/?projectId=${project.id}&ask=${encodeURIComponent(question)}`)}
+          />
         </>
       )}
     </>
