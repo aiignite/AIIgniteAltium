@@ -199,25 +199,39 @@ async def test_system_reaches_provider_from_orchestrator(api, actors, db, monkey
         assert marker in system["content"]
 
 
-async def test_tool_has_no_url_fallback(db, actors, monkeypatch):
-    from app.ai_tools import get_live_design_summary, registry
-    import app.database
+async def test_tool_execution_has_no_implicit_connection(db, actors, monkeypatch):
     from contextlib import asynccontextmanager
+
+    import app.database
+    from app.ai_tools import ToolContext, registry, reset_tool_context, set_tool_context
 
     @asynccontextmanager
     async def session():
         yield db
 
     monkeypatch.setattr(app.database, "async_session_maker", session)
-    conn = GatewayConnection(name="gateway", base_url="http://127.0.0.1:3296")
+    conn = GatewayConnection(name="gateway", base_url="http://127.0.0.1:3296", status="connected")
     db.add(conn)
     await db.commit()
     summary = AsyncMock(return_value={"ok": True})
     monkeypatch.setattr(GatewayClient, "live_summary", summary)
-    denied = await registry.execute("get_live_design_summary", user_id=str(actors["alice"].id), connection_id=str(conn.id))
-    assert denied["success"] is False
-    arbitrary = await registry.execute("get_live_design_summary", base_url="http://127.0.0.1", token="secret")
-    assert arbitrary["success"] is False
+
+    async def run(context, **params):
+        token = set_tool_context(context)
+        try:
+            return await registry.execute("get_live_design_summary", **params)
+        finally:
+            reset_tool_context(token)
+
+    # 会话未关联连接时不回落到「第一条在线连接」
+    assert (await run(ToolContext(user_id=actors["admin"].id)))["success"] is False
+    # 模型给出的地址/令牌一律忽略，只认会话连接
+    assert (await run(ToolContext(user_id=actors["admin"].id),
+                      base_url="http://evil.example", token="secret"))["success"] is False
+    # 会话连接未授权给该用户 → 拒绝
+    assert (await run(ToolContext(user_id=actors["alice"].id, connection_id=conn.id)))["success"] is False
     summary.assert_not_called()
-    allowed = await get_live_design_summary(user_id=str(actors["admin"].id), connection_id=str(conn.id))
+
+    allowed = await run(ToolContext(user_id=actors["admin"].id, connection_id=conn.id))
     assert allowed["success"] is True
+    summary.assert_called_once()

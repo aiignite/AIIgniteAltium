@@ -92,4 +92,34 @@ describe('ConnectionsPage authorization UI', () => {
     expect(path).toBe('/altium/connections/c1/grants')
     expect(body).toEqual({ userIds: ['u2'] })
   })
+
+  it('lists command audits and undoes an executed command', async () => {
+    api.get.mockImplementation((path: string) => {
+      if (path === '/altium/connections') return Promise.resolve([connection])
+      if (path === '/altium/connections/c1/commands/audit?limit=50')
+        return Promise.resolve([
+          {
+            id: 'a1',
+            command: 'altium_move_component',
+            params: { designator: 'U1', x: 10, y: 20 },
+            before: {},
+            status: 'executed',
+            requestId: 'r1',
+            undoOfId: null,
+            error: null,
+            canUndo: true,
+            createdAt: '2026-01-01T00:00:00Z',
+            undoneAt: null,
+          },
+        ])
+      return Promise.resolve([])
+    })
+    render(<ConnectionsPage />)
+    await userEvent.click(await screen.findByTitle('命令历史'))
+    expect(await screen.findByText('altium_move_component')).toBeTruthy()
+    await userEvent.click(screen.getByRole('button', { name: '撤销' }))
+    await waitFor(() =>
+      expect(api.post).toHaveBeenCalledWith('/altium/connections/c1/commands/audit/a1/undo'),
+    )
+  })
 })

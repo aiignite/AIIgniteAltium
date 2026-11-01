@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import {
   ActionIcon,
+  Badge,
   Box,
   Button,
   Card,
@@ -16,8 +17,10 @@ import {
   Tooltip,
 } from '@mantine/core'
 import {
+  IconArrowBackUp,
   IconCheck,
   IconCopy,
+  IconDownload,
   IconHistory,
   IconPlayerStop,
   IconPlus,
@@ -28,6 +31,7 @@ import {
 } from '@tabler/icons-react'
 import { useNavigate } from 'react-router-dom'
 import { api, streamChat, type ActivatedSkill, type ChatStreamEvent } from '../api/client'
+import { safeFilename, triggerDownload } from '../utils/download'
 import { DesignDataTabs } from '../components/DesignDataTabs'
 import { AssistantPicker, type AssistantItem } from '../components/ai/AssistantPicker'
 import { AssistantAvatar } from '../components/ai/AssistantAvatar'
@@ -79,6 +83,12 @@ interface ConfirmationRequest {
   result?: unknown
   error?: string
   executing?: boolean
+  /** 执行时使用的连接与幂等键（撤销时复用） */
+  connectionId?: string
+  requestId?: string
+  undoing?: boolean
+  undoResult?: unknown
+  undoError?: string
 }
 
 interface SkillItem {
@@ -176,6 +186,18 @@ function isToolOk(r: unknown): boolean {
   return true
 }
 
+function newRequestId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+}
+
+function auditIdOf(result: unknown): string | null {
+  if (result && typeof result === 'object') {
+    const id = (result as { auditId?: unknown }).auditId
+    return typeof id === 'string' && id ? id : null
+  }
+  return null
+}
+
 export function WorkbenchPage() {
   const navigate = useNavigate()
   const [projects, setProjects] = useState<ProjectSummary[]>([])
@@ -202,9 +224,6 @@ export function WorkbenchPage() {
   const stickToBottom = useRef(true)
   const abortRef = useRef<AbortController | null>(null)
   const pendingAsk = useRef(searchParams.get('ask'))
-
-  // 实时 Altium 连接：有在线网关时，右侧优先显示 Altium 当前打开的 PCB。
-  const [liveConnId, setLiveConnId] = useState<string | null>(null)
 
   const assistant = useMemo(
     () => assistants.find((a) => a.id === assistantId) ?? assistants.find((a) => a.isDefault) ?? null,
@@ -263,18 +282,6 @@ export function WorkbenchPage() {
     })
     loadConversations()
   }, [loadConversations, searchParams])
-
-  // 轮询检测实时网关连接：在线则右侧显示 Altium 当前打开的 PCB。
-  useEffect(() => {
-    const check = () =>
-      api
-        .get<{ connected: boolean; id?: string }>('/altium/connections/first-connected')
-        .then((c) => setLiveConnId(c?.connected ? (c.id ?? null) : null))
-        .catch(() => setLiveConnId(null))
-    check()
-    const t = window.setInterval(check, 5000)
-    return () => window.clearInterval(t)
-  }, [])
 
   useEffect(() => {
     localStorage.setItem(
@@ -341,9 +348,16 @@ export function WorkbenchPage() {
     async (c: ConversationItem) => {
       setShowHistory(false)
       try {
-        const msgs = await api.get<{ role: string; content: string; skills: ActivatedSkill[]; assistantName: string }[]>(
-          `/ai/conversations/${c.id}/messages`,
-        )
+        const msgs = await api.get<
+          {
+            role: string
+            content: string
+            skills: ActivatedSkill[]
+            assistantName: string
+            provider: string
+            toolLog?: ToolLogEntry[]
+          }[]
+        >(`/ai/conversations/${c.id}/messages`)
         setMessages(
           msgs
             .filter((m) => m.role === 'user' || m.role === 'assistant')
@@ -352,6 +366,8 @@ export function WorkbenchPage() {
               content: m.content,
               skills: m.skills,
               assistantName: m.assistantName,
+              provider: m.provider || undefined,
+              toolLog: m.toolLog ?? [],
             })),
         )
         setConversationId(c.id)
@@ -567,38 +583,77 @@ export function WorkbenchPage() {
     void send(question)
   }, [streaming, sourceReady, send, requestedProject, requestedConnection, projectId, connectionId])
 
-  // 写操作确认：直连后端命令代理执行（confirmed=true）
+  // 写操作确认：直连后端命令代理执行（confirmed=true），带 requestId 保证幂等
   const confirmTool = useCallback(
     async (i: number, conf: ConfirmationRequest) => {
       if (streaming) return
       setStreaming(true)
-      const finish = (patch: { result?: unknown; error?: string }) =>
+      const patch = (p: Partial<ConfirmationRequest>) =>
         setMessages((prev) => {
           const next = [...prev]
           const m = next[i]
-          if (m?.confirmation)
-            next[i] = { ...m, confirmation: { ...m.confirmation, executing: false, ...patch } }
+          if (m?.confirmation) next[i] = { ...m, confirmation: { ...m.confirmation, ...p } }
           return next
         })
+      patch({ executing: true, error: undefined })
       try {
-        const conn = await api.get<{ connected: boolean; id?: string }>('/altium/connections/first-connected')
-        if (!conn.connected || !conn.id) {
-          finish({ error: '没有已连接的 Altium 网关（请先在「实时连接」页配置并测试连接）' })
+        const connId = conf.connectionId ?? connectionId
+        if (!connId) {
+          patch({ executing: false, error: '未关联实时连接：请在左侧选择「Altium 实时连接」后再确认执行' })
           return
         }
-        const payload = await api.post<Record<string, unknown>>(`/altium/connections/${conn.id}/command`, {
+        const requestId = newRequestId()
+        const payload = await api.post<Record<string, unknown>>(`/altium/connections/${connId}/command`, {
           name: conf.tool,
-          params: { ...conf.params, confirmed: true },
+          params: { ...conf.params, confirmed: true, requestId },
         })
-        finish({ result: payload })
+        patch({ executing: false, result: payload, connectionId: connId, requestId })
       } catch (e) {
-        finish({ error: e instanceof Error ? e.message : String(e) })
+        patch({ executing: false, error: e instanceof Error ? e.message : String(e) })
       } finally {
         setStreaming(false)
       }
     },
-    [streaming],
+    [streaming, connectionId],
   )
+
+  // 撤销已确认的写操作（基于审计快照的确定性逆命令）
+  const undoCommand = useCallback(async (i: number, connId: string, auditId: string) => {
+    const patch = (p: Partial<ConfirmationRequest>) =>
+      setMessages((prev) => {
+        const next = [...prev]
+        const m = next[i]
+        if (m?.confirmation) next[i] = { ...m, confirmation: { ...m.confirmation, ...p } }
+        return next
+      })
+    patch({ undoing: true, undoError: undefined })
+    try {
+      const res = await api.post<{ ok: boolean; result?: unknown }>(
+        `/altium/connections/${connId}/commands/audit/${auditId}/undo`,
+      )
+      patch({ undoing: false, undoResult: res, undoError: res.ok === false ? '撤销命令执行失败' : undefined })
+    } catch (e) {
+      patch({ undoing: false, undoError: e instanceof Error ? e.message : '撤销失败' })
+    }
+  }, [])
+
+  const [exporting, setExporting] = useState(false)
+  const [exportError, setExportError] = useState('')
+  const exportConversation = useCallback(async () => {
+    if (!conversationId || exporting) return
+    setExporting(true)
+    setExportError('')
+    try {
+      const url = await api.blob(`/ai/conversations/${conversationId}/export.md`)
+      const title = conversations.find((c) => c.id === conversationId)?.title ?? '对话'
+      triggerDownload(url, safeFilename(`${title}.md`))
+      window.setTimeout(() => URL.revokeObjectURL(url), 1500)
+    } catch (e) {
+      setExportError(e instanceof Error ? e.message : '导出失败')
+    } finally {
+      setExporting(false)
+    }
+  }, [conversationId, exporting, conversations])
 
   const cancelTool = useCallback((i: number) => {
     setMessages((prev) => {
@@ -657,6 +712,19 @@ export function WorkbenchPage() {
               }}
             />
             <Group gap={4} wrap="nowrap">
+              <Tooltip label={conversationId ? '导出对话（Markdown）' : '暂无对话可导出'}>
+                <Button
+                  variant="subtle"
+                  color="gray"
+                  px={6}
+                  aria-label="导出对话"
+                  disabled={!conversationId || streaming || exporting}
+                  onClick={exportConversation}
+                  styles={{ root: { borderRadius: 8 } }}
+                >
+                  {exporting ? <Loader size={14} /> : <IconDownload size={16} />}
+                </Button>
+              </Tooltip>
               <Tooltip label="历史对话">
                 <Button
                   variant="subtle"
@@ -802,6 +870,11 @@ export function WorkbenchPage() {
                 </Group>
               ))}
             </ScrollArea.Autosize>
+          )}
+          {exportError && (
+            <Text size="10px" c="red" mt={4}>
+              导出失败：{exportError}
+            </Text>
           )}
         </Box>
 
@@ -998,6 +1071,39 @@ export function WorkbenchPage() {
                             执行结果：{resultText(m.confirmation.result)}
                           </Text>
                         )}
+                        {m.confirmation.result !== undefined &&
+                          m.confirmation.connectionId &&
+                          auditIdOf(m.confirmation.result) &&
+                          !m.confirmation.undoResult &&
+                          !m.confirmation.undoError && (
+                            <Button
+                              size="compact-xs"
+                              variant="light"
+                              color="orange"
+                              mt={6}
+                              leftSection={<IconArrowBackUp size={12} />}
+                              loading={m.confirmation.undoing}
+                              onClick={() =>
+                                undoCommand(
+                                  i,
+                                  m.confirmation!.connectionId!,
+                                  auditIdOf(m.confirmation!.result)!,
+                                )
+                              }
+                            >
+                              撤销这次修改
+                            </Button>
+                          )}
+                        {m.confirmation.undoResult !== undefined && !m.confirmation.undoError && (
+                          <Text size="11px" style={{ marginTop: 4, color: '#047857' }}>
+                            已撤销，设计已恢复到执行前状态
+                          </Text>
+                        )}
+                        {m.confirmation.undoError && (
+                          <Text size="11px" style={{ marginTop: 4, color: '#b91c1c' }}>
+                            撤销失败：{m.confirmation.undoError}
+                          </Text>
+                        )}
                         {m.confirmation.error && (
                           <Text size="11px" style={{ marginTop: 4, color: '#b91c1c' }}>
                             {m.confirmation.error}
@@ -1132,8 +1238,12 @@ export function WorkbenchPage() {
       <Box style={{ flex: 1, minWidth: 0, height: '100%' }} visibleFrom="md">
         {source === 'project' && projectId ? (
           <DesignDataTabs projectId={projectId} onAskAI={(question) => send(question)} />
-        ) : source === 'live' && (connectionId ?? liveConnId) ? (
-          <LiveAltiumPanel connectionId={(connectionId ?? liveConnId)!} />
+        ) : source === 'live' && connectionId ? (
+          <LiveAltiumPanel
+            connectionId={connectionId}
+            projects={projects}
+            onAskAI={(question) => send(question)}
+          />
         ) : (
           <Paper withBorder p="xl" h="100%" radius="lg">
             <Text c="dimmed" ta="center" mt="xl">
@@ -1160,11 +1270,43 @@ interface LiveSummary {
   errors?: string[]
 }
 
-function LiveAltiumPanel({ connectionId }: { connectionId: string }) {
+interface DriftResult {
+  drifted: boolean
+  projectId: string
+  projectName: string
+  snapshotVersion: number
+  components: {
+    onlyInLive: string[]
+    onlyInSnapshot: string[]
+    changed: { designator: string; fields: Record<string, { live: unknown; snapshot: unknown }> }[]
+    countLive: number
+    countSnapshot: number
+  }
+  nets: {
+    onlyInLive: string[]
+    onlyInSnapshot: string[]
+    countLive: number
+    countSnapshot: number
+  }
+}
+
+function LiveAltiumPanel({
+  connectionId,
+  projects,
+  onAskAI,
+}: {
+  connectionId: string
+  projects: ProjectSummary[]
+  onAskAI: (question: string) => void
+}) {
   const [summary, setSummary] = useState<LiveSummary | null>(null)
   const [screenshot, setScreenshot] = useState<string | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
+  const [compareId, setCompareId] = useState<string | null>(null)
+  const [drift, setDrift] = useState<DriftResult | null>(null)
+  const [driftError, setDriftError] = useState('')
+  const [driftLoading, setDriftLoading] = useState(false)
 
   const load = async () => {
     setLoading(true)
@@ -1184,6 +1326,25 @@ function LiveAltiumPanel({ connectionId }: { connectionId: string }) {
     }
   }
 
+  const loadDrift = useCallback(
+    async (projectId: string) => {
+      setDriftLoading(true)
+      setDriftError('')
+      try {
+        const d = await api.get<DriftResult>(
+          `/altium/connections/${connectionId}/drift?projectId=${encodeURIComponent(projectId)}`,
+        )
+        setDrift(d)
+      } catch (e) {
+        setDrift(null)
+        setDriftError(e instanceof Error ? e.message : '漂移对比失败')
+      } finally {
+        setDriftLoading(false)
+      }
+    },
+    [connectionId],
+  )
+
   useEffect(() => {
     load()
     const t = window.setInterval(load, 6000)
@@ -1196,6 +1357,15 @@ function LiveAltiumPanel({ connectionId }: { connectionId: string }) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connectionId])
+
+  useEffect(() => {
+    if (!compareId) {
+      setDrift(null)
+      setDriftError('')
+      return
+    }
+    loadDrift(compareId)
+  }, [compareId, loadDrift])
 
   if (error) {
     return (
@@ -1217,7 +1387,14 @@ function LiveAltiumPanel({ connectionId }: { connectionId: string }) {
         <Text fw={600} truncate style={{ maxWidth: '78%' }}>
           {summary?.project ? `Altium 实时：${summary.project}` : 'Altium 实时（未打开工程）'}
         </Text>
-        <Button size="compact-xs" variant="light" onClick={load}>
+        <Button
+          size="compact-xs"
+          variant="light"
+          onClick={() => {
+            load()
+            if (compareId) loadDrift(compareId)
+          }}
+        >
           刷新
         </Button>
       </Group>
@@ -1248,6 +1425,108 @@ function LiveAltiumPanel({ connectionId }: { connectionId: string }) {
         <Text size="xs" c="dimmed" mb="xs">
           板框：{summary.board.widthMils} × {summary.board.heightMils ?? '?'} mil，{summary.board.layers ?? '?'} 层
         </Text>
+      )}
+      {projects.length > 0 && (
+        <Paper withBorder p="xs" mb="sm">
+          <Group justify="space-between" wrap="nowrap" gap="xs">
+            <Text size="xs" fw={600}>
+              与离线快照对比
+            </Text>
+            <Select
+              size="xs"
+              w={200}
+              placeholder="选择离线工程"
+              aria-label="对比离线工程"
+              clearable
+              searchable
+              data={projects.map((p) => ({ value: p.id, label: p.name }))}
+              value={compareId}
+              onChange={setCompareId}
+            />
+          </Group>
+          {driftLoading && (
+            <Group justify="center" py={4}>
+              <Loader size="xs" />
+            </Group>
+          )}
+          {driftError && (
+            <Text size="11px" c="red" mt={4}>
+              对比失败：{driftError}
+            </Text>
+          )}
+          {drift && !driftLoading && (
+            <Box mt={6}>
+              <Group gap={4} wrap="wrap">
+                <Badge color={drift.drifted ? 'orange' : 'green'} variant="light">
+                  {drift.drifted ? '检测到漂移' : '与快照一致'}
+                </Badge>
+                <Badge color="gray" variant="light">
+                  元件 {drift.components.countLive} / 快照 {drift.components.countSnapshot}
+                </Badge>
+                {drift.components.onlyInLive.length > 0 && (
+                  <Badge color="blue" variant="light">
+                    新增 {drift.components.onlyInLive.length}
+                  </Badge>
+                )}
+                {drift.components.onlyInSnapshot.length > 0 && (
+                  <Badge color="red" variant="light">
+                    缺失 {drift.components.onlyInSnapshot.length}
+                  </Badge>
+                )}
+                {drift.components.changed.length > 0 && (
+                  <Badge color="yellow" variant="light">
+                    变更 {drift.components.changed.length}
+                  </Badge>
+                )}
+                {drift.nets.onlyInLive.length + drift.nets.onlyInSnapshot.length > 0 && (
+                  <Badge color="violet" variant="light">
+                    网络差异 {drift.nets.onlyInLive.length + drift.nets.onlyInSnapshot.length}
+                  </Badge>
+                )}
+              </Group>
+              {drift.drifted && (
+                <>
+                  <Text size="10px" c="dimmed" mt={4} style={{ wordBreak: 'break-all' }}>
+                    实时独有：
+                    {[...drift.components.onlyInLive, ...drift.nets.onlyInLive].slice(0, 12).join('、') || '—'}
+                  </Text>
+                  <Text size="10px" c="dimmed" style={{ wordBreak: 'break-all' }}>
+                    快照独有：
+                    {[...drift.components.onlyInSnapshot, ...drift.nets.onlyInSnapshot].slice(0, 12).join('、') || '—'}
+                  </Text>
+                  <Text size="10px" c="dimmed" style={{ wordBreak: 'break-all' }}>
+                    字段变更：
+                    {drift.components.changed
+                      .slice(0, 8)
+                      .map((c) => `${c.designator}（${Object.keys(c.fields).join('/')}）`)
+                      .join('、') || '—'}
+                  </Text>
+                </>
+              )}
+              <Group gap={6} mt={6}>
+                <Button size="compact-xs" variant="light" onClick={() => loadDrift(drift.projectId)}>
+                  刷新对比
+                </Button>
+                <Button
+                  size="compact-xs"
+                  variant="light"
+                  color="teal"
+                  disabled={!drift.drifted}
+                  onClick={() =>
+                    onAskAI(
+                      `实时 Altium 设计与离线快照（工程「${drift.projectName}」v${drift.snapshotVersion}）存在差异：` +
+                        `实时新增 ${drift.components.onlyInLive.length} 个元件、快照独有 ${drift.components.onlyInSnapshot.length} 个、` +
+                        `${drift.components.changed.length} 个字段变更、网络差异 ${drift.nets.onlyInLive.length + drift.nets.onlyInSnapshot.length} 个。` +
+                        '请解读这些差异的影响并给出处理建议。',
+                    )
+                  }
+                >
+                  让 AI 解读差异
+                </Button>
+              </Group>
+            </Box>
+          )}
+        </Paper>
       )}
       {screenshot && (
         <div className="svg-viewer" style={{ border: '1px solid var(--mantine-color-gray-3)' }}>

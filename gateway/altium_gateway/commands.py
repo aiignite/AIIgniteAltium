@@ -22,9 +22,104 @@ class CommandDef:
     category: str = "query"
     requires_confirmation: bool = False
     params_schema: dict[str, Any] = field(default_factory=dict)
+    # 语义查询命令：复用现有只读桥 op，在网关侧过滤/截断（不改 DelphiScript 协议）
+    post_filter: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]] | None = None
+    op_selector: Callable[[dict[str, Any]], str] | None = None
+
+    def resolve_op(self, params: dict[str, Any]) -> str:
+        return self.op_selector(params) if self.op_selector else self.op_name
 
     def build_ops(self, params: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
-        return [(self.op_name, params)]
+        if self.post_filter is not None:
+            return [(self.resolve_op(params), {})]
+        return [(self.resolve_op(params), params)]
+
+
+_DEFAULT_LIMIT = 20
+_MAX_LIMIT = 60
+
+
+def _text(value: Any) -> str:
+    return str(value if value is not None else "").strip()
+
+
+def _matched(haystack: str, needle: str) -> bool:
+    return not needle or needle.lower() in haystack.lower()
+
+
+def _limit(value: Any) -> int:
+    try:
+        size = int(value) if value is not None else _DEFAULT_LIMIT
+    except (TypeError, ValueError):
+        size = _DEFAULT_LIMIT
+    return max(1, min(size, _MAX_LIMIT))
+
+
+def _optional(**specs: dict[str, Any]) -> dict[str, Any]:
+    return {key: {**value, "required": False} for key, value in specs.items()}
+
+
+def _page(payload: dict[str, Any], rows: list[dict[str, Any]], size: int, filters: dict[str, Any]) -> dict[str, Any]:
+    """语义查询统一信封：保留桥原始字段，追加匹配数与截断标记。"""
+    if not payload.get("ok"):
+        return payload
+    out = dict(payload)
+    out["items"] = rows[:size]
+    out["matched"] = len(rows)
+    out["returned"] = min(len(rows), size)
+    out["truncated"] = len(rows) > size
+    out["filters"] = filters
+    if out["truncated"]:
+        out["hint"] = "结果已截断，请收紧过滤条件或提高 limit"
+    return out
+
+
+def _filter_components(payload: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
+    designator = _text(params.get("designator"))
+    value = _text(params.get("value"))
+    footprint = _text(params.get("footprint"))
+    rows = [
+        dict(item) for item in (payload.get("items") or [])
+        if isinstance(item, dict)
+        and _matched(_text(item.get("designator")), designator)
+        and _matched(_text(item.get("value")), value)
+        and _matched(_text(item.get("footprint")), footprint)
+    ]
+    return _page(payload, rows, _limit(params.get("limit")),
+                 {"designator": designator, "value": value, "footprint": footprint})
+
+
+def _net_terminals(item: dict[str, Any]) -> int:
+    for key in ("count", "terminalCount"):
+        if isinstance(item.get(key), int):
+            return item[key]
+    terminals = item.get("terminals")
+    return len(terminals) if isinstance(terminals, list) else 0
+
+
+def _filter_nets(payload: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
+    name = _text(params.get("name"))
+    rows = []
+    for item in payload.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        terminals = _net_terminals(item)
+        if not _matched(_text(item.get("name")), name):
+            continue
+        if params.get("min_terminals") is not None and terminals < int(params["min_terminals"]):
+            continue
+        if params.get("max_terminals") is not None and terminals > int(params["max_terminals"]):
+            continue
+        row = dict(item)
+        row["terminalCount"] = terminals
+        rows.append(row)
+    return _page(payload, rows, _limit(params.get("limit")),
+                 {"name": name, "minTerminals": params.get("min_terminals"),
+                  "maxTerminals": params.get("max_terminals")})
+
+
+def _component_scope(params: dict[str, Any]) -> str:
+    return "pcb_components" if _text(params.get("scope")).lower() == "pcb" else "sch_components"
 
 
 COMMANDS: dict[str, CommandDef] = {
@@ -83,6 +178,40 @@ COMMANDS: dict[str, CommandDef] = {
         description="截取 Altium 当前文档窗口画面（供多模态模型查看）",
         op_name="take_screenshot",
         params_schema={},
+    ),
+    "altium_find_components": CommandDef(
+        name="altium_find_components",
+        title="按条件查元件",
+        description=(
+            "在当前 Altium 原理图或 PCB 中按位号/值/封装片段查询元件（scope=sch|pcb，默认 sch）。"
+            "大设计请用它按需取明细，不要请求全量清单"
+        ),
+        op_name="sch_components",
+        params_schema=_optional(
+            designator={"type": "str", "description": "位号包含的片段，如 U、R1"},
+            value={"type": "str", "description": "值/型号包含的片段"},
+            footprint={"type": "str", "description": "封装包含的片段"},
+            scope={"type": "str", "description": "查询范围：sch（默认）或 pcb"},
+            limit={"type": "int", "description": "最多返回条数，默认 20，上限 60"},
+        ),
+        post_filter=_filter_components,
+        op_selector=_component_scope,
+    ),
+    "altium_find_nets": CommandDef(
+        name="altium_find_nets",
+        title="按条件查网络",
+        description=(
+            "在当前 Altium 原理图中按网络名片段与端子数查询网络；"
+            "max_terminals=1 用于找单端/悬空网络"
+        ),
+        op_name="sch_nets",
+        params_schema=_optional(
+            name={"type": "str", "description": "网络名包含的片段，如 USB、GND"},
+            min_terminals={"type": "int", "description": "最小连接端子数"},
+            max_terminals={"type": "int", "description": "最大连接端子数"},
+            limit={"type": "int", "description": "最多返回条数，默认 20，上限 60"},
+        ),
+        post_filter=_filter_nets,
     ),
     "altium_highlight_net": CommandDef(
         name="altium_highlight_net",
@@ -235,6 +364,8 @@ def execute_command(driver: AltiumDriver, name: str, params: dict[str, Any] | No
     ops = cmd.build_ops(exec_params)
     results = driver.execute(ops)
     payload = results[0] if results else {"ok": False, "error": "no result"}
+    if cmd.post_filter is not None and isinstance(payload, dict):
+        payload = cmd.post_filter(payload, exec_params)
     payload["command"] = name
     return _post_process(name, payload)
 

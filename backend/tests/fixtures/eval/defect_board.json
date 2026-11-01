@@ -1,0 +1,44 @@
+{
+  "_comment": "AIDriveAltium 确定性审查金标准缺陷板：每条 p2.0 规则至少命中一次，用于查全率回归。",
+  "project": { "name": "金标准缺陷板" },
+  "components": [
+    { "designator": "U1", "value": "STM32F103", "footprint": "LQFP48" },
+    { "designator": "U1", "value": "STM32F103", "footprint": "LQFP48" },
+    { "designator": "C1", "value": "100n", "footprint": "" },
+    { "designator": "R1", "value": "", "footprint": "0603" },
+    { "designator": "D5", "value": "LED", "footprint": "0603" }
+  ],
+  "nets": [
+    { "name": "GND", "terminalCount": 4 },
+    { "name": "VCC_3V3", "terminalCount": 3 },
+    { "name": "Net12", "terminalCount": 3 },
+    { "name": "SPARE", "terminalCount": 1 }
+  ],
+  "bom": [
+    { "designator": "U1", "value": "STM32F103", "footprint": "LQFP48", "dnp": false },
+    { "designator": "C1", "value": "100n", "footprint": "", "dnp": false },
+    { "designator": "R1", "value": "", "footprint": "0603", "dnp": true },
+    { "designator": "X9", "value": "过期元件", "footprint": "0805", "dnp": false }
+  ],
+  "pcbs": [
+    { "name": "good", "board": { "outlineRectMils": [0, 0, 1000, 800] } },
+    { "name": "nobuf" },
+    { "name": "degenerate", "board": { "outlineRectMils": [10, 10, 10, 800] } },
+    { "name": "offorigin", "board": { "outlineRectMils": [100, 100, 1200, 900] } }
+  ],
+  "warnings": ["解析降级：忽略未知对象 3 个"],
+  "expected_rules": [
+    "duplicate_designator",
+    "missing_footprint",
+    "missing_value",
+    "bom_missing_row",
+    "bom_orphan_row",
+    "single_terminal_net",
+    "net_auto_named",
+    "dnp_bom_rows",
+    "parse_warnings",
+    "board_outline_missing",
+    "board_outline_invalid",
+    "board_outline_off_origin"
+  ]
+}

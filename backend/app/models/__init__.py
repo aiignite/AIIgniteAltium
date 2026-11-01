@@ -11,4 +11,4 @@ from app.models.ai import (  # noqa: F401,E402
     Message,
 )
 from app.models.files import ParseJob, ReviewRun, SnapshotVersion, UploadedProject  # noqa: F401,E402
-from app.models.altium import ConnectionGrant, GatewayConnection  # noqa: F401,E402
+from app.models.altium import AltiumCommandAudit, ConnectionGrant, GatewayConnection  # noqa: F401,E402

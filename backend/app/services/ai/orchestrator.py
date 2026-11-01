@@ -17,6 +17,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.ai_tools import ToolContext, current_tool_context, reset_tool_context, set_tool_context
 from app.models.ai.ai_model import AIModelConfig
 from app.models.ai.assistant import AIAssistant, AISkill
 from app.models.ai.conversation import Conversation, Message
@@ -130,13 +131,16 @@ async def build_messages(db: AsyncSession, *, conversation: Conversation, conten
     if conversation.project_id is not None:
         project = await get_owned_project(db, conversation.project_id, conversation.user_id)
         if project.snapshot:
-            context_text = build_design_context(project.snapshot)
+            context_text = build_design_context(project.snapshot, query=content)
     elif conversation.connection_id is not None:
         try:
             conn = await get_accessible_connection(db, conversation.connection_id, conversation.user_id)
-            context_text = live_summary_to_context(await GatewayClient(conn.base_url, conn.api_token).live_summary())
+            summary = await GatewayClient(conn.base_url, conn.api_token).live_summary()
+            context_text = live_summary_to_context(summary, content)
         except Exception as exc:  # noqa: BLE001 —— 实时上下文失败不影响对话
             logger.info("live context unavailable: %s", exc)
+    if conversation.connection_id is not None:
+        context_text = await _append_failed_verifications(db, conversation, context_text)
     system = compose_system_prompt(assistant, skills, context_text)
 
     result = await db.execute(select(Message).where(
@@ -149,6 +153,31 @@ async def build_messages(db: AsyncSession, *, conversation: Conversation, conten
     return messages, system
 
 
+async def _append_failed_verifications(db: AsyncSession, conversation: Conversation, context_text: str) -> str:
+    """把本会话连接最近的「写后即查未通过」记录回喂模型，驱动自我修正（失败即降级）。"""
+    from app.models.altium.audit import AltiumCommandAudit
+    from app.services.altium.verification import verification_status, verification_to_context
+
+    try:
+        rows = await db.execute(
+            select(AltiumCommandAudit)
+            .where(
+                AltiumCommandAudit.connection_id == conversation.connection_id,
+                AltiumCommandAudit.status == "executed",
+            )
+            .order_by(AltiumCommandAudit.created_at.desc())
+            .limit(20)
+        )
+        flagged = verification_status(list(rows.scalars()))
+    except Exception as exc:  # noqa: BLE001 —— 回喂失败不影响对话
+        logger.info("verification feedback unavailable: %s", exc)
+        return context_text
+    if not flagged:
+        return context_text
+    section = verification_to_context(flagged)
+    return f"{context_text}\n\n{section}" if context_text else section
+
+
 def _skill_tool_allowlist(assistant: AIAssistant | None, skills: list) -> set[str] | None:
     """助手 + 技能的可用工具并集；为空表示不限制。"""
     allowed: set[str] = set(assistant.tool_codes or []) if assistant is not None else set()
@@ -158,15 +187,16 @@ def _skill_tool_allowlist(assistant: AIAssistant | None, skills: list) -> set[st
     return allowed or None
 
 
-async def _build_tools(assistant: AIAssistant | None, skills: list, resolution: ProviderResolution) -> list[dict]:
+async def _build_tools(assistant: AIAssistant | None, skills: list, resolution: ProviderResolution,
+                       context: ToolContext) -> list[dict]:
     if not resolution.supports_tools:
         logger.info("model %s 不支持 tools，跳过工具装配", resolution.model_name)
         return []
     try:
         from app.ai_tools import sync_gateway_tools, tool_definitions
 
-        await sync_gateway_tools()
-        defs = tool_definitions()
+        await sync_gateway_tools(context)
+        defs = tool_definitions(context)
     except Exception as exc:  # noqa: BLE001 —— 工具装配失败不影响普通对话
         logger.info("tool setup skipped: %s", exc)
         return []
@@ -251,6 +281,7 @@ async def stream_reply(db: AsyncSession, *, user_id: UUID, content: str, convers
     started = time.time()
     assistant_message: Message | None = None
     accumulated: list[str] = []
+    context_token = None
     try:
         conversation = await authorize_chat_sources(db, user_id=user_id, conversation_id=conversation_id,
                                                    project_id=project_id, connection_id=connection_id)
@@ -282,6 +313,9 @@ async def stream_reply(db: AsyncSession, *, user_id: UUID, content: str, convers
             conversation.project_id = project_id
         if connection_id is not None:
             conversation.connection_id = connection_id
+        # 工具仅能看到并操作本对话关联的连接/工程，不存在「取第一条在线连接」的隐式路由
+        context_token = set_tool_context(ToolContext(user_id=user_id, connection_id=conversation.connection_id,
+                                                     project_id=conversation.project_id))
 
         try:
             resolution = await resolve(
@@ -324,9 +358,10 @@ async def stream_reply(db: AsyncSession, *, user_id: UUID, content: str, convers
 
         messages, _system = await build_messages(db, conversation=conversation, content=content,
                                                  assistant=assistant, skills=loaded_skills)
-        tool_defs = await _build_tools(assistant, loaded_skills, resolution)
+        tool_defs = await _build_tools(assistant, loaded_skills, resolution, current_tool_context())
 
         tool_messages: list[dict] = []
+        tool_log: list[dict] = []
         usage: dict | None = None
         last_flush = time.monotonic()
         for _round in range(MAX_TOOL_ROUNDS):
@@ -381,34 +416,63 @@ async def stream_reply(db: AsyncSession, *, user_id: UUID, content: str, convers
             )
             from app.ai_tools import registry
 
-            for call in pending_calls:
-                name = call.get("name", "")
-                args = call.get("arguments") or {}
-                yield {"type": "tool_call", "tool": name, "params": args}
-                meta = registry.get(name)
-                if meta is None:
-                    result = {"success": False, "error": f"未知工具: {name}"}
-                elif meta["requires_confirmation"]:
-                    try:
-                        preview_payload = await registry.execute(name, **{**args, "dry_run": True})
-                    except Exception as exc:  # noqa: BLE001
-                        preview_payload = {"error": f"预览失败: {exc}"}
-                    preview = preview_payload.get("preview") or preview_payload.get("error") or "（无预览）"
-                    yield {
-                        "type": "tool_confirmation_required",
-                        "tool": name,
-                        "params": args,
-                        "preview": preview,
-                    }
-                    result = {
-                        "success": False,
-                        "requiresConfirmation": True,
-                        "preview": preview,
-                        "error": "写操作待用户确认：确认后请回复「确认执行」",
-                    }
-                else:
-                    result = await registry.execute(name, **args)
+            calls = [(call, registry.get(call.get("name", ""))) for call in pending_calls]
+            for call, _meta in calls:
+                yield {"type": "tool_call", "tool": call.get("name", ""), "params": call.get("arguments") or {}}
+
+            results: list[dict] = []
+            readonly = len(calls) > 1 and all(
+                meta is not None and not meta["requires_confirmation"] for _call, meta in calls
+            )
+            if readonly:
+                results = list(
+                    await asyncio.gather(
+                        *(
+                            registry.execute(call.get("name", ""), **(call.get("arguments") or {}))
+                            for call, _meta in calls
+                        )
+                    )
+                )
+                for (call, _meta), result in zip(calls, results):
+                    name = call.get("name", "")
+                    tool_log.append({"name": name, "params": call.get("arguments") or {}, "result": result})
                     yield {"type": "tool_result", "tool": name, "result": result}
+            else:
+                for call, meta in calls:
+                    name = call.get("name", "")
+                    args = call.get("arguments") or {}
+                    if meta is None:
+                        result = {"success": False, "error": f"未知工具: {name}"}
+                        tool_log.append({"name": name, "params": args, "result": result})
+                    elif meta["requires_confirmation"]:
+                        try:
+                            preview_payload = await registry.execute(name, **{**args, "dry_run": True})
+                        except Exception as exc:  # noqa: BLE001
+                            preview_payload = {"error": f"预览失败: {exc}"}
+                        preview = preview_payload.get("preview") or preview_payload.get("error") or "（无预览）"
+                        tool_log.append(
+                            {"name": name, "params": args, "requiresConfirmation": True, "preview": preview}
+                        )
+                        yield {
+                            "type": "tool_confirmation_required",
+                            "tool": name,
+                            "params": args,
+                            "preview": preview,
+                        }
+                        result = {
+                            "success": False,
+                            "requiresConfirmation": True,
+                            "preview": preview,
+                            "error": "写操作待用户确认：确认后请回复「确认执行」",
+                        }
+                    else:
+                        result = await registry.execute(name, **args)
+                        tool_log.append({"name": name, "params": args, "result": result})
+                        yield {"type": "tool_result", "tool": name, "result": result}
+                    results.append(result)
+            if tool_log:
+                assistant_message.meta = {**(assistant_message.meta or {}), "toolLog": list(tool_log)}
+            for (call, _meta), result in zip(calls, results):
                 tool_messages.append(
                     {"role": "tool", "tool_call_id": call["id"], "content": json.dumps(result, ensure_ascii=False)}
                 )
@@ -449,3 +513,6 @@ async def stream_reply(db: AsyncSession, *, user_id: UUID, content: str, convers
         if assistant_message is not None:
             done["messageId"] = str(assistant_message.id)
         yield done
+    finally:
+        if context_token is not None:
+            reset_tool_context(context_token)

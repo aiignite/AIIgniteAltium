@@ -172,3 +172,61 @@ def test_write_confirmed_executes_and_strips_control_keys():
     assert rot["ok"] is True and rot["rotation"] == 180
     hl = execute_command(driver, "altium_highlight_net", {"net": "GND", "confirmed": True})
     assert hl["ok"] is True and hl["net"] == "GND"
+
+
+def test_mock_state_changes_after_writes():
+    """撤销前置校验依赖「执行后状态真的变了」，mock 驱动必须保持同一份状态。"""
+
+    driver = MockAltiumDriver()
+    execute_command(driver, "altium_move_component", {"designator": "U1", "x": 5000, "y": 6000, "confirmed": True})
+    execute_command(driver, "altium_rotate_component", {"designator": "U2", "rotation": 45, "confirmed": True})
+    after = {c["designator"]: c for c in execute_command(driver, "altium_get_pcb_components")["items"]}
+    assert (after["U1"]["x"], after["U1"]["y"]) == (5000, 6000)
+    assert after["U2"]["rotation"] == 45
+
+    unknown = execute_command(driver, "altium_move_component", {"designator": "R99", "x": 1, "y": 2, "confirmed": True})
+    assert unknown["ok"] is False and "R99" in unknown["error"]
+
+
+# ---------- 语义查询命令：复用只读桥 op，在网关侧过滤/分页 ----------
+
+
+def test_find_components_filters_scope_and_limit():
+    driver = MockAltiumDriver()
+    by_designator = execute_command(driver, "altium_find_components", {"designator": "U"})
+    assert by_designator["ok"] is True
+    assert {i["designator"] for i in by_designator["items"]} == {"U1", "U2", "OUT1", "USB_Mini"}
+    assert by_designator["matched"] == 4 and by_designator["returned"] == 4
+    assert by_designator["truncated"] is False and by_designator["filters"]["designator"] == "U"
+
+    by_footprint = execute_command(driver, "altium_find_components", {"value": "STM32"})
+    assert [i["designator"] for i in by_footprint["items"]] == ["U2"]
+
+    scoped = execute_command(driver, "altium_find_components", {"scope": "pcb", "footprint": "LQFP"})
+    assert scoped["items"][0]["designator"] == "U2" and scoped["items"][0]["x"] == 2400
+
+    paged = execute_command(driver, "altium_find_components", {"limit": 2})
+    assert paged["returned"] == 2 and paged["truncated"] is True and paged["matched"] == 5
+    assert "hint" in paged
+
+    capped = execute_command(driver, "altium_find_components", {"limit": 5000})
+    assert capped["returned"] == 5  # 上限保护，避免一次拉回整板数据
+
+
+def test_find_nets_filters_by_name_and_terminal_count():
+    driver = MockAltiumDriver()
+    single = execute_command(driver, "altium_find_nets", {"max_terminals": 1})
+    assert [i["name"] for i in single["items"]] == ["NetC4_1"]
+    assert single["items"][0]["terminalCount"] == 1
+
+    heavy = execute_command(driver, "altium_find_nets", {"min_terminals": 20})
+    assert [i["name"] for i in heavy["items"]] == ["GND"]
+
+    usb = execute_command(driver, "altium_find_nets", {"name": "usb"})
+    assert {i["name"] for i in usb["items"]} == {"USB_DP", "USB_DM"}
+    assert usb["filters"] == {"name": "usb", "minTerminals": None, "maxTerminals": None}
+
+    query_commands = [c for c in COMMANDS.values() if c.post_filter is not None]
+    assert {c.name for c in query_commands} == {"altium_find_components", "altium_find_nets"}
+    for cmd in query_commands:
+        assert cmd.category == "query" and cmd.requires_confirmation is False

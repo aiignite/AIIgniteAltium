@@ -19,7 +19,7 @@ import {
   TextInput,
   Tooltip,
 } from '@mantine/core'
-import { IconEye, IconKey, IconPencil, IconPlugConnected, IconRefresh, IconTrash } from '@tabler/icons-react'
+import { IconEye, IconHistory, IconKey, IconPencil, IconPlugConnected, IconRefresh, IconTrash } from '@tabler/icons-react'
 import { api } from '../api/client'
 import { useAuth } from '../contexts/AuthContext'
 
@@ -79,6 +79,7 @@ export function ConnectionsPage() {
   const [busy, setBusy] = useState('')
   const [panelId, setPanelId] = useState<string | null>(null)
   const [grantsId, setGrantsId] = useState<string | null>(null)
+  const [auditId, setAuditId] = useState<string | null>(null)
 
   const load = useCallback(() => api.get<Connection[]>('/altium/connections').then(setConnections), [])
   useEffect(() => {
@@ -219,6 +220,9 @@ export function ConnectionsPage() {
                     <ActionIcon variant="subtle" title="实时面板" onClick={() => setPanelId(c.id)}>
                       <IconEye size={16} />
                     </ActionIcon>
+                    <ActionIcon variant="subtle" title="命令历史" onClick={() => setAuditId(c.id)}>
+                      <IconHistory size={16} />
+                    </ActionIcon>
                     {isAdmin && (
                       <>
                         <ActionIcon variant="subtle" title="编辑" onClick={() => openEdit(c)}>
@@ -297,6 +301,14 @@ export function ConnectionsPage() {
       )}
 
       {panelId && <LivePanel connectionId={panelId} onClose={() => setPanelId(null)} />}
+
+      {auditId && (
+        <AuditDrawer
+          connectionId={auditId}
+          connectionName={connections.find((c) => c.id === auditId)?.name ?? '连接'}
+          onClose={() => setAuditId(null)}
+        />
+      )}
     </Stack>
   )
 }
@@ -371,6 +383,177 @@ function GrantsModal({ connection, onClose }: { connection: Connection | null; o
         </Button>
       </Stack>
     </Modal>
+  )
+}
+
+interface CommandAuditEntry {
+  id: string
+  command: string
+  params: Record<string, unknown>
+  status: string
+  requestId: string
+  undoOfId: string | null
+  error: string | null
+  canUndo: boolean
+  verified?: boolean
+  verifyFailed?: boolean
+  verification?: { checked?: boolean; ok?: boolean; issues?: string[]; note?: string }
+  createdAt: string
+  undoneAt: string | null
+}
+
+const AUDIT_STATUS: Record<string, { color: string; label: string }> = {
+  executed: { color: 'green', label: '已执行' },
+  failed: { color: 'red', label: '失败' },
+  undone: { color: 'gray', label: '已撤销' },
+}
+
+function AuditDrawer({
+  connectionId,
+  connectionName,
+  onClose,
+}: {
+  connectionId: string
+  connectionName: string
+  onClose: () => void
+}) {
+  const [entries, setEntries] = useState<CommandAuditEntry[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [busyId, setBusyId] = useState('')
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError('')
+    try {
+      setEntries(
+        await api.get<CommandAuditEntry[]>(`/altium/connections/${connectionId}/commands/audit?limit=50`),
+      )
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '加载命令历史失败')
+    } finally {
+      setLoading(false)
+    }
+  }, [connectionId])
+
+  useEffect(() => {
+    load()
+  }, [load])
+
+  const undo = async (entry: CommandAuditEntry) => {
+    setBusyId(entry.id)
+    setError('')
+    try {
+      const res = await api.post<{ ok: boolean }>(
+        `/altium/connections/${connectionId}/commands/audit/${entry.id}/undo`,
+      )
+      if (res.ok === false) setError('撤销命令执行失败')
+      await load()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '撤销失败')
+    } finally {
+      setBusyId('')
+    }
+  }
+
+  return (
+    <Drawer opened position="right" onClose={onClose} title={`命令历史 · ${connectionName}`} size="xl">
+      <Group justify="space-between" mb="sm">
+        <Text size="xs" c="dimmed">
+          最近 50 条已确认的写命令；支持撤销的记录可直接回滚
+        </Text>
+        <Button size="compact-xs" variant="light" onClick={load} loading={loading}>
+          刷新
+        </Button>
+      </Group>
+      {error && (
+        <Alert color="red" mb="sm">
+          {error}
+        </Alert>
+      )}
+      {loading && entries.length === 0 ? (
+        <Group justify="center" mt="xl">
+          <Loader />
+        </Group>
+      ) : entries.length === 0 ? (
+        <Text c="dimmed" ta="center" size="sm" mt="xl">
+          暂无写命令记录
+        </Text>
+      ) : (
+        <Table verticalSpacing="xs">
+          <Table.Thead>
+            <Table.Tr>
+              <Table.Th>时间</Table.Th>
+              <Table.Th>命令</Table.Th>
+              <Table.Th>参数</Table.Th>
+              <Table.Th>状态</Table.Th>
+              <Table.Th style={{ textAlign: 'right' }}>操作</Table.Th>
+            </Table.Tr>
+          </Table.Thead>
+          <Table.Tbody>
+            {entries.map((e) => (
+              <Table.Tr key={e.id}>
+                <Table.Td>
+                  <Text size="xs">{new Date(e.createdAt).toLocaleString('zh-CN')}</Text>
+                </Table.Td>
+                <Table.Td>
+                  <Text size="xs" ff="monospace">
+                    {e.command}
+                  </Text>
+                  {e.undoOfId && (
+                    <Badge size="xs" color="gray" variant="light" ml={4}>
+                      撤销记录
+                    </Badge>
+                  )}
+                </Table.Td>
+                <Table.Td>
+                  <Text size="xs" c="dimmed" style={{ maxWidth: 280, wordBreak: 'break-all' }}>
+                    {JSON.stringify(e.params)}
+                  </Text>
+                </Table.Td>
+                <Table.Td>
+                  <Badge color={AUDIT_STATUS[e.status]?.color ?? 'gray'} variant="light">
+                    {AUDIT_STATUS[e.status]?.label ?? e.status}
+                  </Badge>
+                  {e.verifyFailed ? (
+                    <Badge color="red" variant="light" ml={4} title={(e.verification?.issues ?? []).join('；')}>
+                      写后核验未通过
+                    </Badge>
+                  ) : e.verified ? (
+                    <Badge color="blue" variant="light" ml={4}>
+                      已核验
+                    </Badge>
+                  ) : null}
+                  {e.error && (
+                    <Text size="10px" c="red" mt={2}>
+                      {e.error}
+                    </Text>
+                  )}
+                  {e.verifyFailed && (e.verification?.issues ?? []).length > 0 && (
+                    <Text size="10px" c="red" mt={2}>
+                      {e.verification?.issues?.join('；')}
+                    </Text>
+                  )}
+                </Table.Td>
+                <Table.Td style={{ textAlign: 'right' }}>
+                  {e.canUndo && (
+                    <Button
+                      size="compact-xs"
+                      variant="light"
+                      color="orange"
+                      loading={busyId === e.id}
+                      onClick={() => undo(e)}
+                    >
+                      撤销
+                    </Button>
+                  )}
+                </Table.Td>
+              </Table.Tr>
+            ))}
+          </Table.Tbody>
+        </Table>
+      )}
+    </Drawer>
   )
 }
 

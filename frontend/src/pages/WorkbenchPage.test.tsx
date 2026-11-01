@@ -176,8 +176,132 @@ describe('WorkbenchPage design source selection', () => {
   })
 })
 
-describe('WorkbenchPage deep links', () => {
+describe('WorkbenchPage advanced Altium interactions', () => {
   beforeEach(() => {
+    localStorage.clear()
+    Object.values(api).forEach((fn) => fn.mockReset())
+    streamChat.mockReset()
+    setupApi()
+  })
+
+  it('confirms a write command with an idempotency key and can undo it', async () => {
+    streamChat.mockImplementation(async (_body, onEvent: (e: ChatStreamEvent) => void) => {
+      onEvent({ type: 'meta', conversationId: 'conv-write' })
+      onEvent({
+        type: 'tool_confirmation_required',
+        tool: 'altium_move_component',
+        params: { designator: 'U1', x: 10, y: 20 },
+      })
+      onEvent({ type: 'done' })
+    })
+    api.post.mockResolvedValueOnce({ ok: true, auditId: 'a1' }).mockResolvedValueOnce({ ok: true })
+    render(<WorkbenchPage />, { route: '/?connectionId=c1' })
+    await waitFor(() =>
+      expect((screen.getByRole('combobox', { name: '设计来源' }) as HTMLInputElement).value).toBe(
+        'Altium 实时连接',
+      ),
+    )
+    await sendMessage('把 U1 移到 (10,20)')
+    await userEvent.click(await screen.findByRole('button', { name: '确认执行' }))
+    await waitFor(() => expect(api.post).toHaveBeenCalledTimes(1))
+    const [path, body] = api.post.mock.calls[0]
+    expect(path).toBe('/altium/connections/c1/command')
+    expect(body.name).toBe('altium_move_component')
+    expect(body.params.confirmed).toBe(true)
+    expect(typeof body.params.requestId).toBe('string')
+    expect((body.params.requestId as string).length).toBeGreaterThan(10)
+
+    await userEvent.click(await screen.findByRole('button', { name: '撤销这次修改' }))
+    await waitFor(() => expect(api.post).toHaveBeenCalledTimes(2))
+    expect(api.post.mock.calls[1][0]).toBe('/altium/connections/c1/commands/audit/a1/undo')
+    expect(await screen.findByText('已撤销，设计已恢复到执行前状态')).toBeTruthy()
+  })
+
+  it('restores persisted tool logs from conversation history', async () => {
+    api.get.mockImplementation((path: string) => {
+      if (path === '/files/projects') return Promise.resolve([project])
+      if (path === '/altium/connections') return Promise.resolve([connection])
+      if (path === '/ai/assistants') return Promise.resolve([])
+      if (path === '/ai/skills') return Promise.resolve([])
+      if (path === '/ai/models') return Promise.resolve([{ id: 'm1', name: 'mock', enabled: true }])
+      if (path === '/ai/conversations') return Promise.resolve([boundConversation])
+      if (path === '/ai/conversations/c9/messages')
+        return Promise.resolve([
+          {
+            role: 'assistant',
+            content: '已完成',
+            skills: [],
+            assistantName: '',
+            provider: 'mock',
+            toolLog: [{ name: 'altium_get_board_info', params: { detail: true }, result: { ok: true } }],
+          },
+        ])
+      return Promise.resolve([])
+    })
+    render(<WorkbenchPage />)
+    await screen.findByRole('combobox', { name: '设计来源' })
+    await userEvent.click(screen.getByRole('button', { name: '历史对话' }))
+    await userEvent.click(await screen.findByText('实时对话'))
+    expect(await screen.findByText('altium_get_board_info')).toBeTruthy()
+  })
+
+  it('exports the current conversation as Markdown', async () => {
+    streamChat.mockImplementation(async (_body, onEvent: (e: ChatStreamEvent) => void) => {
+      onEvent({ type: 'meta', conversationId: 'conv-export' })
+      onEvent({ type: 'done' })
+    })
+    api.blob.mockResolvedValue('blob:md')
+    await renderReady()
+    await sendMessage('导出测试')
+    await waitFor(() => expect(streamChat).toHaveBeenCalled())
+    const button = await screen.findByRole('button', { name: '导出对话' })
+    await waitFor(() => expect(button.hasAttribute('disabled')).toBe(false))
+    await userEvent.click(button)
+    await waitFor(() => expect(api.blob).toHaveBeenCalledWith('/ai/conversations/conv-export/export.md'))
+  })
+
+  it('compares live design with an offline snapshot and asks AI to explain drift', async () => {
+    api.get.mockImplementation((path: string) => {
+      if (path === '/files/projects') return Promise.resolve([project])
+      if (path === '/altium/connections') return Promise.resolve([connection])
+      if (path === '/ai/assistants') return Promise.resolve([])
+      if (path === '/ai/skills') return Promise.resolve([])
+      if (path === '/ai/models') return Promise.resolve([{ id: 'm1', name: 'mock', enabled: true }])
+      if (path === '/ai/conversations') return Promise.resolve([])
+      if (path === '/altium/connections/c1/live/summary')
+        return Promise.resolve({ ok: true, project: 'LiveBoard' })
+      if (path === '/altium/connections/c1/drift?projectId=p1')
+        return Promise.resolve({
+          drifted: true,
+          projectId: 'p1',
+          projectName: 'Board A',
+          snapshotVersion: 3,
+          components: {
+            onlyInLive: ['C9'],
+            onlyInSnapshot: [],
+            changed: [],
+            countLive: 13,
+            countSnapshot: 12,
+          },
+          nets: { onlyInLive: [], onlyInSnapshot: [], countLive: 10, countSnapshot: 10 },
+        })
+      return Promise.resolve([])
+    })
+    api.blob.mockResolvedValue('blob:shot')
+    render(<WorkbenchPage />, { route: '/?connectionId=c1' })
+    await pickOption(await screen.findByRole('combobox', { name: '对比离线工程' }))
+    await waitFor(() =>
+      expect(api.get).toHaveBeenCalledWith('/altium/connections/c1/drift?projectId=p1'),
+    )
+    expect(await screen.findByText('检测到漂移')).toBeTruthy()
+    expect(screen.getByText(/实时独有：C9/)).toBeTruthy()
+    await userEvent.click(screen.getByRole('button', { name: '让 AI 解读差异' }))
+    await waitFor(() => expect(streamChat).toHaveBeenCalled())
+    expect(streamChat.mock.calls[0][0].content).toContain('实时 Altium 设计')
+  })
+})
+
+describe('WorkbenchPage deep links', () => {  beforeEach(() => {
     localStorage.clear()
     Object.values(api).forEach((fn) => fn.mockReset())
     streamChat.mockReset()

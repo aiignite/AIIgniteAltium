@@ -94,7 +94,7 @@ async def test_legacy_baseline_copy_adoption_preserves_plaintext_and_no_grants(p
         await conn.run_sync(check_schema_current)
         assert await conn.scalar(text("SELECT api_token FROM alt_connections")) == "old-token"
         assert await conn.scalar(text("SELECT count(*) FROM alt_connection_grants")) == 0
-        assert (await conn.run_sync(lambda c: MigrationContext.configure(c).get_current_revision())) == "0005_ai_platform"
+        assert (await conn.run_sync(lambda c: MigrationContext.configure(c).get_current_revision())) == "0006_command_audit"
 
 
 @pytest.mark.parametrize("tamper", [    "ALTER TABLE alt_connections DROP COLUMN remark",

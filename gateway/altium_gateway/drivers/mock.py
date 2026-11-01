@@ -34,7 +34,30 @@ def _svg_png_data_uri() -> str:
     return "data:image/svg+xml;base64," + base64.b64encode(raw).decode("ascii")
 
 
+def _coord(value: Any) -> int | float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return int(number) if number.is_integer() else number
+
+
 class MockAltiumDriver(AltiumDriver):
+    """内置演示驱动。
+
+    PCB 上的坐标/角度是**可变状态**：移动与旋转会真的改写它，后续读取能看到结果。
+    这样 dry-run 预览、执行、撤销前置校验在脱离 Altium 的环境下同样成立。
+    """
+
+    def __init__(self) -> None:
+        self._places: dict[str, dict[str, Any]] = {}
+        for i, c in enumerate(_MOCK_COMPONENTS):
+            self._places[str(c["designator"]).upper()] = {
+                "x": 2000 + i * 400,
+                "y": 1500 + i * 300,
+                "rotation": (i * 90) % 360,
+            }
+
     def execute(self, ops: list[tuple[str, dict[str, Any]]]) -> list[dict[str, Any]]:
         return [self._run(op, params) for op, params in ops]
 
@@ -63,11 +86,12 @@ class MockAltiumDriver(AltiumDriver):
             return {"ok": True, "count": len(nets), "items": nets, "document": "mock_sch.SchDoc"}
         if op == "pcb_components":
             items = []
-            for i, c in enumerate(_MOCK_COMPONENTS):
+            for c in _MOCK_COMPONENTS:
                 item = dict(c)
-                item["x"] = 2000 + i * 400
-                item["y"] = 1500 + i * 300
-                item["rotation"] = (i * 90) % 360
+                place = self._places.get(str(c["designator"]).upper()) or {}
+                item["x"] = place.get("x", 0)
+                item["y"] = place.get("y", 0)
+                item["rotation"] = place.get("rotation", 0)
                 items.append(item)
             return {"ok": True, "count": len(items), "items": items, "document": "mock_pcb.PcbDoc"}
         if op == "pcb_stats":
@@ -107,15 +131,26 @@ class MockAltiumDriver(AltiumDriver):
             designator = str(params.get("designator") or "")
             if not designator:
                 return {"ok": False, "error": "missing designator/x/y params"}
-            x, y = params.get("x"), params.get("y")
+            x, y = _coord(params.get("x")), _coord(params.get("y"))
             if x is None or y is None:
                 return {"ok": False, "error": "missing designator/x/y params"}
+            place = self._places.get(designator.upper())
+            if place is None:
+                return {"ok": False, "error": f"mock 中未找到元件 {designator}"}
+            place["x"], place["y"] = x, y
             return {"ok": True, "designator": designator, "x": x, "y": y}
         if op == "pcb_rotate_component":
             designator = str(params.get("designator") or "")
             if not designator:
                 return {"ok": False, "error": "missing designator/rotation params"}
-            return {"ok": True, "designator": designator, "rotation": params.get("rotation")}
+            rotation = _coord(params.get("rotation"))
+            if rotation is None:
+                return {"ok": False, "error": "missing designator/rotation params"}
+            place = self._places.get(designator.upper())
+            if place is None:
+                return {"ok": False, "error": f"mock 中未找到元件 {designator}"}
+            place["rotation"] = rotation % 360
+            return {"ok": True, "designator": designator, "rotation": rotation}
         return {"ok": False, "error": f"mock driver 未实现 op: {op}"}
 
     def is_alive(self) -> bool:

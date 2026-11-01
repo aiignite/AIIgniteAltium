@@ -3,7 +3,7 @@ import logging
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,8 +13,10 @@ from app.models.ai.conversation import Conversation, Message
 from app.models.system.user import User
 from app.schemas import CamelModel
 from app.security import get_current_user
-from app.services.ai.orchestrator import preflight_chat, stream_reply
 from app.services.ai.access import get_owned_conversation
+from app.services.ai.chat_export import render_conversation
+from app.services.ai.orchestrator import preflight_chat, stream_reply
+from app.services.files.exports import attachment_headers
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/ai", tags=["ai"])
@@ -49,6 +51,7 @@ class MessageOut(CamelModel):
     content: str
     skill: str
     skills: list[dict] = []
+    tool_log: list[dict] = []
     assistant_name: str = ""
     provider: str
     created_at: str
@@ -77,6 +80,7 @@ def _msg_out(m: Message) -> MessageOut:
         content=m.content,
         skill=m.skill,
         skills=list(meta.get("skills") or []),
+        tool_log=list(meta.get("toolLog") or []),
         assistant_name=str(meta.get("assistantName") or ""),
         provider=m.provider,
         created_at=m.created_at.isoformat(),
@@ -141,6 +145,25 @@ async def list_messages(
         select(Message).where(Message.conversation_id == conversation_id).order_by(Message.seq)
     )
     return [_msg_out(m) for m in result.scalars()]
+
+
+@router.get("/conversations/{conversation_id}/export.md")
+async def export_conversation(
+    conversation_id: UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    conversation = await get_owned_conversation(db, conversation_id, user.id)
+    result = await db.execute(
+        select(Message).where(Message.conversation_id == conversation_id).order_by(Message.seq)
+    )
+    content = render_conversation(conversation, list(result.scalars()))
+    filename = f"{conversation.title or 'conversation'}-{conversation_id}.md"
+    return Response(
+        content=content,
+        media_type="text/markdown; charset=utf-8",
+        headers=attachment_headers(filename),
+    )
 
 
 @router.delete("/conversations/{conversation_id}")

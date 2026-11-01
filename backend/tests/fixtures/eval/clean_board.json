@@ -1,0 +1,23 @@
+{
+  "_comment": "AIDriveAltium 一致性金标准板：满足全部 p2.0 规则阈值，期望零 findings，用于误报率回归。",
+  "project": { "name": "金标准干净板" },
+  "components": [
+    { "designator": "R1", "value": "10k", "footprint": "0603" },
+    { "designator": "C1", "value": "100n", "footprint": "0603" },
+    { "designator": "U1", "value": "STM32F103", "footprint": "LQFP48" }
+  ],
+  "nets": [
+    { "name": "GND", "terminalCount": 5 },
+    { "name": "VCC_3V3", "terminalCount": 3 },
+    { "name": "SPI_CLK", "terminalCount": 2 }
+  ],
+  "bom": [
+    { "designator": "R1", "value": "10k", "footprint": "0603", "dnp": false },
+    { "designator": "C1", "value": "100n", "footprint": "0603", "dnp": false },
+    { "designator": "U1", "value": "STM32F103", "footprint": "LQFP48", "dnp": false }
+  ],
+  "pcbs": [
+    { "name": "main", "board": { "outlineRectMils": [0, 0, 2000, 1500] } }
+  ],
+  "warnings": []
+}
